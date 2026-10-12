@@ -6,7 +6,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -15,59 +15,65 @@ import { type TextContent, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const MINOR = "0.15";
-/** letmeknow's binary, and the kinds' plugins it runs from beside it. */
-const BIN = join(homedir(), ".cache", "pi-letmeknow");
-const LETMEKNOW = join(BIN, process.platform === "win32" ? "letmeknow.exe" : "letmeknow");
+// Termux's node says android; the static Linux binaries run there.
+const TARGET = `${process.platform === "android" ? "linux" : process.platform}-${process.arch}`;
+const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
+const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
 const run = promisify(execFile);
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
 // process loads, the first to start a session puts it in letmeknow, until that session ends.
 const claim = globalThis as { piLetmeknow?: true };
 
-/** Puts the newest release of letmeknow MINOR for this machine into BIN, from npm, unless it is there already. */
-async function update(): Promise<void> {
-	// Termux's node says android; the static Linux binaries run there.
-	const target = `${process.platform === "android" ? "linux" : process.platform}-${process.arch}`;
-	const found = await fetch(`https://registry.npmjs.org/@letmeknow/${target}`, { headers: { accept: "application/vnd.npm.install-v1+json" } });
-	if (!found.ok) throw new Error(`npm has no @letmeknow/${target} (${found.status})`);
-	const { versions } = (await found.json()) as { versions: Record<string, { dist: { tarball: string; integrity: string } }> };
-	const patch = (version: string) => Number(version.split(".")[2]);
-	const latest = Object.keys(versions)
+async function install(warn: (message: string) => void): Promise<string> {
+	await mkdir(CACHE, { recursive: true });
+	let versions!: Record<string, { dist: { tarball: string; integrity: string } }>;
+	let available: string[];
+	let offline: Error | undefined;
+	try {
+		const found = await fetch(`https://registry.npmjs.org/@letmeknow/${TARGET}`, { headers: { accept: "application/vnd.npm.install-v1+json" } });
+		if (!found.ok) throw new Error(`npm has no @letmeknow/${TARGET} (${found.status})`);
+		({ versions } = await found.json() as { versions: typeof versions });
+		available = Object.keys(versions);
+	} catch (error) {
+		offline = error as Error;
+		available = (await readdir(CACHE, { withFileTypes: true }))
+			.filter(entry => entry.isDirectory() && existsSync(join(CACHE, entry.name, "bin", EXECUTABLE)))
+			.map(entry => entry.name);
+	}
+	const latest = available
 		.filter(version => version.startsWith(`${MINOR}.`) && /^\d+\.\d+\.\d+$/.test(version))
-		.sort((a, b) => patch(a) - patch(b))
+		.sort((a, b) => Number(a.split(".")[2]) - Number(b.split(".")[2]))
 		.at(-1);
-	if (!latest) throw new Error(`letmeknow has no ${MINOR} release for ${target}`);
-	if (existsSync(LETMEKNOW) && (await run(LETMEKNOW, ["--version"])).stdout.trim() === `letmeknow ${latest}`) return;
+	if (!latest) throw offline ?? new Error(`letmeknow has no ${MINOR} release for ${TARGET}`);
+	const dest = join(CACHE, latest);
+	const executable = join(dest, "bin", EXECUTABLE);
+	if (offline) warn(`letmeknow: cannot look for a newer ${MINOR} release (${offline.message}); running cached ${latest}`);
+	if (existsSync(executable)) return executable;
 	const { tarball, integrity } = versions[latest].dist;
 	const fetched = await fetch(tarball);
 	if (!fetched.ok) throw new Error(`cannot fetch letmeknow ${latest} (${fetched.status})`);
 	const bytes = Buffer.from(await fetched.arrayBuffer());
 	if (`sha512-${createHash("sha512").update(bytes).digest("base64")}` !== integrity) throw new Error(`letmeknow ${latest} does not match its integrity`);
-	await mkdir(BIN, { recursive: true });
-	const tmp = await mkdtemp(join(BIN, "new-"));
-	await writeFile(join(tmp, "package.tgz"), bytes);
-	// By a relative name: GNU tar, which Git for Windows puts first on PATH, takes the `C:` of a path for a remote host.
-	await run("tar", ["-xzf", "package.tgz"], { cwd: tmp });
-	const files = await readdir(join(tmp, "package", "bin"));
-	for (const file of await readdir(BIN)) {
-		// What the last release had and this one has not, as a kind's plugin it dropped, which letmeknow would run, as it
-		// runs every plugin beside it but those with a '.' in their names.
-		if (!files.includes(file) && !file.endsWith(".old") && !file.startsWith("new-")) await rename(join(BIN, file), join(BIN, `${file}.${Date.now()}.old`));
+	const tmp = await mkdtemp(join(CACHE, "new-"));
+	try {
+		await writeFile(join(tmp, "package.tgz"), bytes);
+		// GNU tar on Windows takes the `C:` of an absolute path for a remote host.
+		await run("tar", ["-xzf", "package.tgz"], { cwd: tmp });
+		await access(join(tmp, "package", "bin", EXECUTABLE));
+		try {
+			await rename(join(tmp, "package"), dest);
+		} catch (error) {
+			// Another installer may have published the same complete package first (Windows can report EPERM).
+			if (!existsSync(executable)) throw error;
+		}
+	} finally {
+		await rm(tmp, { recursive: true });
 	}
-	for (const file of files) {
-		const dest = join(BIN, file);
-		// Windows cannot replace a program that runs, but can move it aside.
-		if (process.platform === "win32" && existsSync(dest)) await rename(dest, `${dest}.${Date.now()}.old`);
-		await rename(join(tmp, "package", "bin", file), dest);
-	}
-	await rm(tmp, { recursive: true });
-	for (const file of await readdir(BIN)) {
-		// What this or an earlier update moved aside; on Windows, one that still runs goes at a later update.
-		if (file.endsWith(".old")) await rm(join(BIN, file)).catch(() => {});
-	}
+	return executable;
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { handle: string; removable: boolean; listen?: ChildProcess } | undefined;
+	let session: { handle: string; removable: boolean; executable: Promise<string>; listen?: ChildProcess } | undefined;
 	let pending: TextContent[] | undefined;
 
 	function notify(text: string): void {
@@ -97,7 +103,10 @@ export default function (pi: ExtensionAPI): void {
 		async execute(_id, { args, input }, signal, _onUpdate, ctx) {
 			// A Pi session that followed one in letmeknow, in the same process, may be in none.
 			if (!session) throw new Error("this Pi session is not in letmeknow");
-			const running = run(LETMEKNOW, args, { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
+			const current = session;
+			const executable = await current.executable;
+			if (session !== current) throw new Error("this Pi session has left letmeknow");
+			const running = run(executable, ["--session", current.handle, ...args], { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
 			running.child.stdin!.end(input ?? "");
 			try {
 				return { content: [{ type: "text", text: (await running).stdout }], details: undefined };
@@ -114,17 +123,16 @@ export default function (pi: ExtensionAPI): void {
 		pi.registerTool(tool);
 		// A letmeknow handle has letters, digits, '.', '_' and '-'.
 		const handle = name ? name.replace(/[^\w.-]+/g, "-") : `pi-${ctx.sessionManager.getSessionId().slice(-12)}`;
-		const current: NonNullable<typeof session> = { handle, removable: !name };
+		const current: NonNullable<typeof session> = {
+			handle, removable: !name,
+			executable: install(message => ctx.ui.notify(message, "warning")),
+		};
 		session = current;
 		process.env.LETMEKNOW_SESSION = handle;
-		const ready = update().catch(error => {
-			if (!existsSync(LETMEKNOW)) throw error;
-			ctx.ui.notify(`letmeknow: cannot look for a newer ${MINOR} release (${error.message}); running the one here`, "warning");
-		});
-		ready.then(
-			() => {
+		current.executable.then(
+			executable => {
 				if (session !== current) return;
-				const listen = spawn(LETMEKNOW, ["--session", handle, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
+				const listen = spawn(executable, ["--session", handle, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
 				current.listen = listen;
 				ctx.ui.setStatus("letmeknow", `letmeknow: ${handle}`);
 				let errors = "";
@@ -144,15 +152,16 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (!session) return;
-		const { handle, removable, listen } = session;
+		const { handle, removable, listen, executable } = session;
 		session = undefined;
 		delete claim.piLetmeknow;
 		delete process.env.LETMEKNOW_SESSION;
 		ctx.ui.setStatus("letmeknow", undefined);
 		// One whose letmeknow had not started yet has nothing to stop.
 		if (!listen) return;
-		const { sessions } = JSON.parse((await run(LETMEKNOW, ["sessions"])).stdout) as { sessions: { handle: string; groups: unknown[] }[] };
-		if (removable && sessions.some(s => s.handle === handle && !s.groups.length)) await run(LETMEKNOW, ["sessions", "remove", handle]);
+		const binary = await executable;
+		const { sessions } = JSON.parse((await run(binary, ["sessions"])).stdout) as { sessions: { handle: string; groups: unknown[] }[] };
+		if (removable && sessions.some(s => s.handle === handle && !s.groups.length)) await run(binary, ["sessions", "remove", handle]);
 		else listen.kill();
 	});
 }
