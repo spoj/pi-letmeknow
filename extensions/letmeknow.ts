@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const MINOR = "0.14";
+const MINOR = "0.15";
 /** letmeknow's binary, and the kinds' plugins it runs from beside it. */
 const BIN = join(homedir(), ".cache", "pi-letmeknow");
 const LETMEKNOW = join(BIN, process.platform === "win32" ? "letmeknow.exe" : "letmeknow");
