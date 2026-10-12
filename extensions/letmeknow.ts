@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import { type TextContent, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const MINOR = "0.15";
+const MINOR = "0.16";
 // Termux's node says android; the static Linux binaries run there.
 const TARGET = `${process.platform === "android" ? "linux" : process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
