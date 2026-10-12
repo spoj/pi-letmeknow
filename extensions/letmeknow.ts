@@ -43,20 +43,20 @@ async function update(): Promise<void> {
 	const bytes = Buffer.from(await fetched.arrayBuffer());
 	if (`sha512-${createHash("sha512").update(bytes).digest("base64")}` !== integrity) throw new Error(`letmeknow ${latest} does not match its integrity`);
 	await mkdir(BIN, { recursive: true });
-	for (const file of await readdir(BIN)) {
-		// What an earlier update moved aside on Windows; one that still runs goes at a later update.
-		if (file.endsWith(".old")) await rm(join(BIN, file)).catch(() => {});
-	}
 	const tmp = await mkdtemp(join(BIN, "new-"));
 	await writeFile(join(tmp, "package.tgz"), bytes);
 	await run("tar", ["-xzf", join(tmp, "package.tgz"), "-C", tmp]);
-	for (const file of await readdir(join(tmp, "package", "bin"))) {
-		const dest = join(BIN, file);
-		// Windows cannot replace a program that runs, but can move it aside.
-		if (process.platform === "win32" && existsSync(dest)) await rename(dest, `${dest}.${Date.now()}.old`);
-		await rename(join(tmp, "package", "bin", file), dest);
+	// The release replaces the last one whole, as letmeknow runs the plugins it finds beside it, but not those with a '.'
+	// in their names: the last one's files move aside, as Windows allows of a program that runs.
+	for (const file of await readdir(BIN)) {
+		if (join(BIN, file) !== tmp && !file.endsWith(".old")) await rename(join(BIN, file), join(BIN, `${file}.${Date.now()}.old`));
 	}
+	for (const file of await readdir(join(tmp, "package", "bin"))) await rename(join(tmp, "package", "bin", file), join(BIN, file));
 	await rm(tmp, { recursive: true });
+	for (const file of await readdir(BIN)) {
+		// Windows cannot delete a program that runs: it goes at a later update.
+		if (file.endsWith(".old")) await rm(join(BIN, file), { recursive: true }).catch(() => {});
+	}
 }
 
 export default function (pi: ExtensionAPI): void {
