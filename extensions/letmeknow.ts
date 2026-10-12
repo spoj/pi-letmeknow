@@ -2,7 +2,7 @@
 // of that name, or else `pi-<end of its id>`, which goes when the Pi session ends in no group. It runs letmeknow's own
 // binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. What
 // the letmeknow session prints reaches the agent as a message that starts a turn; its `ready` only names the session,
-// which the system prompt and status line show.
+// which the system prompt and status line show. The agent's `letmeknow` tool runs the same binary for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -11,8 +11,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
-import type { TextContent } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type TextContent, Type } from "@earendil-works/pi-ai";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const MINOR = "0.15";
 /** letmeknow's binary, and the kinds' plugins it runs from beside it. */
@@ -84,10 +84,33 @@ export default function (pi: ExtensionAPI): void {
 		if (ctx.isIdle()) pending = undefined;
 	});
 
+	const tool = defineTool({
+		name: "letmeknow",
+		label: "letmeknow",
+		description:
+			"Runs a letmeknow command in this session's letmeknow session, which runs already: `args` as the command takes them, as [\"send\", \"--to\", \"ann\", \"hi\"], and `input` for an argument \"-\" to read. Answers with what the command prints.",
+		parameters: Type.Object({
+			args: Type.Array(Type.String()),
+			input: Type.Optional(Type.String()),
+		}),
+		async execute(_id, { args, input }, signal, _onUpdate, ctx) {
+			// A Pi session that followed one in letmeknow, in the same process, may be in none.
+			if (!session) throw new Error("this Pi session is not in letmeknow");
+			const running = run(LETMEKNOW, args, { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
+			running.child.stdin!.end(input ?? "");
+			try {
+				return { content: [{ type: "text", text: (await running).stdout }], details: undefined };
+			} catch (error) {
+				throw new Error((error as { stderr?: string }).stderr?.trim() || (error as Error).message);
+			}
+		},
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		const name = ctx.sessionManager.getSessionName();
 		if ((!name && ctx.mode !== "tui") || claim.piLetmeknow) return;
 		claim.piLetmeknow = true;
+		pi.registerTool(tool);
 		// A letmeknow handle has letters, digits, '.', '_' and '-'.
 		const handle = name ? name.replace(/[^\w.-]+/g, "-") : `pi-${ctx.sessionManager.getSessionId().slice(-12)}`;
 		const current: NonNullable<typeof session> = { handle, removable: !name };
@@ -115,7 +138,7 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", event => {
 		if (!session) return;
-		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}, which runs already: what it prints reaches you as messages, and only what you send with it reaches anyone. Read \`npx -y @letmeknow/cli@${MINOR} skill\` before you first use letmeknow.`;
+		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}, which runs already: what it prints reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
