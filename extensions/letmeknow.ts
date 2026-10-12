@@ -45,7 +45,8 @@ async function update(): Promise<void> {
 	await mkdir(BIN, { recursive: true });
 	const tmp = await mkdtemp(join(BIN, "new-"));
 	await writeFile(join(tmp, "package.tgz"), bytes);
-	await run("tar", ["-xzf", join(tmp, "package.tgz"), "-C", tmp]);
+	// By a relative name: GNU tar, which Git for Windows puts first on PATH, takes the `C:` of a path for a remote host.
+	await run("tar", ["-xzf", "package.tgz"], { cwd: tmp });
 	const files = await readdir(join(tmp, "package", "bin"));
 	for (const file of await readdir(BIN)) {
 		// What the last release had and this one has not, as a kind's plugin it dropped, which letmeknow would run, as it
