@@ -13,7 +13,7 @@ import { Type } from "typebox";
 
 const run = promisify(execFile);
 const home = await mkdtemp(join(tmpdir(), "pi-letmeknow-test-"));
-const target = `${process.platform === "android" ? "linux" : process.platform}-${process.arch}`;
+const target = `${process.platform}-${process.arch}`;
 const cache = join(home, ".cache", "pi-letmeknow");
 const executable = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
 let versions, requests, calls, listeners, notices, groups, offline, afterExtract;

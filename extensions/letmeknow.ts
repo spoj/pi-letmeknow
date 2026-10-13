@@ -15,8 +15,7 @@ import { type TextContent, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const MINOR = "0.17";
-// Termux's node says android; the static Linux binaries run there.
-const TARGET = `${process.platform === "android" ? "linux" : process.platform}-${process.arch}`;
+const TARGET = `${process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
 const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
 const run = promisify(execFile);
