@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import { type TextContent, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const MINOR = "0.17";
+const MINOR = "0.18";
 const TARGET = `${process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
 const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
