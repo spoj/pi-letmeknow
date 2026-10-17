@@ -103,7 +103,7 @@ function start(name = "named") {
 	let tool;
 	const ctx = {
 		cwd: home, mode: "tui",
-		sessionManager: { getSessionName: () => name, getSessionId: () => "123456789012" },
+		sessionManager: { getSessionName: () => name },
 		ui: {
 			notify: (message, level) => {
 				notices.push({ message, level });
@@ -147,22 +147,26 @@ test("new patch startup leaves old listener, skill, plugin, tool and shutdown bo
 	const newer = start();
 	assert.equal(await newer.ready, undefined);
 	assert.deepEqual(listeners.map(item => item.file), [oldBinary, newBinary]);
+	const [handle, other] = listeners.map(item => item.args[1]);
+	assert.match(handle, /^pi-[0-9a-f]{8}$/);
+	assert.notEqual(handle, other, "each Pi session is a new letmeknow session");
 	for (const args of [["skill"], ["kind", "read"], ["send", "--to", "someone", "-"]]) {
 		assert.equal((await old.command(args, "input")).content[0].text, "0.20.1: old kind: skill 0.20.1");
 		assert.equal(calls.at(-1).file, oldBinary);
-		assert.deepEqual(calls.at(-1).args, ["--session", "pi-123456789012", ...args]);
+		assert.deepEqual(calls.at(-1).args, ["--session", handle, ...args]);
 	}
 	assert.equal((await newer.command(["skill"])).content[0].text, "0.20.2: kind 0.20.2: skill 0.20.2");
 	assert.equal(await readFile(join(dirname(oldBinary), "retired"), "utf8"), "retired plugin");
 	assert.equal(existsSync(join(dirname(newBinary), "retired")), false);
-	groups = [{ handle: "pi-123456789012", groups: [] }];
+	groups = [{ handle, groups: [] }, { handle: other, groups: ["a group"] }];
 	await old.shutdown();
+	assert.equal(listeners[0].child.killed, true);
 	assert.deepEqual(calls.slice(-2).map(({ file, args }) => ({ file, args })), [
 		{ file: oldBinary, args: ["sessions"] },
-		{ file: oldBinary, args: ["sessions", "remove", "pi-123456789012"] },
+		{ file: oldBinary, args: ["sessions", "remove", handle] },
 	]);
 	await newer.shutdown();
-	assert.equal(calls.at(-1).file, newBinary);
+	assert.deepEqual(calls.at(-1), { file: newBinary, args: ["sessions"] }, "one in a group stays");
 	assert.equal(listeners[1].child.killed, true);
 });
 

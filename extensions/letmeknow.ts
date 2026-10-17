@@ -1,10 +1,10 @@
-// Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as the letmeknow session
-// of that name, or else `pi-<end of its id>`, which goes when the Pi session ends in no group. It runs letmeknow's own
+// Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as a new letmeknow session
+// with a short random handle, which goes when the Pi session ends in no group. It runs letmeknow's own
 // binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. What
 // the letmeknow session prints reaches the agent as a message that starts a turn; its `ready` only names the session,
 // which the system prompt and status line show. The agent's `letmeknow` tool runs the same binary for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -72,7 +72,7 @@ async function install(warn: (message: string) => void): Promise<string> {
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { handle: string; removable: boolean; executable: Promise<string>; listen?: ChildProcess } | undefined;
+	let session: { handle: string; executable: Promise<string>; listen?: ChildProcess } | undefined;
 	let pending: TextContent[] | undefined;
 
 	function notify(text: string): void {
@@ -116,16 +116,11 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
-		const name = ctx.sessionManager.getSessionName();
-		if ((!name && ctx.mode !== "tui") || claim.piLetmeknow) return;
+		if ((!ctx.sessionManager.getSessionName() && ctx.mode !== "tui") || claim.piLetmeknow) return;
 		claim.piLetmeknow = true;
 		pi.registerTool(tool);
-		// A letmeknow handle has letters, digits, '.', '_' and '-'.
-		const handle = name ? name.replace(/[^\w.-]+/g, "-") : `pi-${ctx.sessionManager.getSessionId().slice(-12)}`;
-		const current: NonNullable<typeof session> = {
-			handle, removable: !name,
-			executable: install(message => ctx.ui.notify(message, "warning")),
-		};
+		const handle = `pi-${randomUUID().slice(0, 8)}`;
+		const current: NonNullable<typeof session> = { handle, executable: install(message => ctx.ui.notify(message, "warning")) };
 		session = current;
 		process.env.LETMEKNOW_SESSION = handle;
 		current.executable.then(
@@ -151,16 +146,16 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (!session) return;
-		const { handle, removable, listen, executable } = session;
+		const { handle, listen, executable } = session;
 		session = undefined;
 		delete claim.piLetmeknow;
 		delete process.env.LETMEKNOW_SESSION;
 		ctx.ui.setStatus("letmeknow", undefined);
 		// One whose letmeknow had not started yet has nothing to stop.
 		if (!listen) return;
+		listen.kill();
 		const binary = await executable;
 		const { sessions } = JSON.parse((await run(binary, ["sessions"])).stdout) as { sessions: { handle: string; groups: unknown[] }[] };
-		if (removable && sessions.some(s => s.handle === handle && !s.groups.length)) await run(binary, ["sessions", "remove", handle]);
-		else listen.kill();
+		if (sessions.some(s => s.handle === handle && !s.groups.length)) await run(binary, ["sessions", "remove", handle]);
 	});
 }
