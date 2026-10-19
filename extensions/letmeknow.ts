@@ -128,7 +128,7 @@ export default function (pi: ExtensionAPI): void {
 				if (session !== current) return;
 				const listen = spawn(executable, ["--session", handle, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
 				current.listen = listen;
-				ctx.ui.setStatus("letmeknow", `letmeknow: ${handle}`);
+				ctx.ui.setStatus("letmeknow", `lmk:${handle}`);
 				let errors = "";
 				listen.stderr!.on("data", chunk => (errors = (errors + chunk).slice(-2000)));
 				listen.on("error", error => ctx.ui.notify(`letmeknow: ${error.message}`, "error"));
