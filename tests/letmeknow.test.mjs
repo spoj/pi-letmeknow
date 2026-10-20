@@ -45,6 +45,7 @@ mock.module("node:child_process", {
 				kill: () => { child.killed = true; },
 			});
 			listeners.push({ file, args, child });
+			child.stdout.write(`${JSON.stringify({ type: "ready", handle: args[1], fp: "0123456789abcdef" })}\n`);
 			return child;
 		},
 	},
@@ -98,7 +99,7 @@ function start(name = "named") {
 	delete globalThis.piLetmeknow;
 	const handlers = {};
 	const ready = Promise.withResolvers();
-	let tool;
+	let tool, status;
 	const ctx = {
 		cwd: home, mode: "tui",
 		sessionManager: { getSessionName: () => name },
@@ -107,13 +108,19 @@ function start(name = "named") {
 				notices.push({ message, level });
 				if (level === "error") ready.resolve(new Error(message));
 			},
-			setStatus: (_key, value) => { if (value) ready.resolve(); },
+			setStatus: (_key, value) => { status = value; if (value) ready.resolve(); },
 		},
 	};
 	extension({ on: (event, handler) => { handlers[event] = handler; }, registerTool: value => { tool = value; } });
 	handlers.session_start({}, ctx);
 	return {
 		ready: ready.promise,
+		status: () => status,
+		systemPrompt: () => {
+			const event = { systemPromptOptions: { sections: {} } };
+			handlers.before_agent_start(event);
+			return event.systemPromptOptions.sections.letmeknow;
+		},
 		command: (args, input) => tool.execute("id", { args, input }, undefined, undefined, ctx),
 		shutdown: () => handlers.session_shutdown({}, ctx),
 	};
@@ -199,6 +206,15 @@ test("an older install finishing after a newer install cannot replace its packag
 	assert.deepEqual(listeners.map(item => item.file), [newBinary, oldBinary]);
 	assert.equal((await old.command(["skill"])).content[0].text, "0.23.4: kind 0.23.4: skill 0.23.4");
 	assert.equal((await newer.command(["skill"])).content[0].text, "0.23.5: kind 0.23.5: skill 0.23.5");
+});
+
+test("the status line and system prompt give the session's fingerprint once it is ready", async () => {
+	await release("0.23.8");
+	const session = start();
+	assert.doesNotMatch(session.systemPrompt(), /fingerprint/);
+	assert.equal(await session.ready, undefined);
+	assert.equal(session.status(), "lmk:0123456789abcdef");
+	assert.match(session.systemPrompt(), /^You are in letmeknow as its session pi-[0-9a-f]{8} \(fingerprint 0123456789abcdef, as other members know it\),/);
 });
 
 test("tools await selection, and shutdown during installation never launches a listener or command", async () => {

@@ -1,8 +1,8 @@
 // Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as a new letmeknow session
 // with a short random handle, which goes when the Pi session ends in no group. It runs letmeknow's own
 // binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. What
-// the letmeknow session prints reaches the agent as a message that starts a turn; its `ready` only names the session,
-// which the system prompt and status line show. The agent's `letmeknow` tool runs the same binary for its commands.
+// the letmeknow session prints reaches the agent as a message that starts a turn; its `ready` only gives the session's
+// fingerprint, which the system prompt and status line show, as other members know the session by it. The agent's `letmeknow` tool runs the same binary for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -72,7 +72,7 @@ async function install(warn: (message: string) => void): Promise<string> {
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { handle: string; executable: Promise<string>; listen?: ChildProcess } | undefined;
+	let session: { handle: string; executable: Promise<string>; listen?: ChildProcess; fp?: string } | undefined;
 	let pending: TextContent[] | undefined;
 
 	function notify(text: string): void {
@@ -128,12 +128,17 @@ export default function (pi: ExtensionAPI): void {
 				if (session !== current) return;
 				const listen = spawn(executable, ["--session", handle, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
 				current.listen = listen;
-				ctx.ui.setStatus("letmeknow", `lmk:${handle}`);
 				let errors = "";
 				listen.stderr!.on("data", chunk => (errors = (errors + chunk).slice(-2000)));
 				listen.on("error", error => ctx.ui.notify(`letmeknow: ${error.message}`, "error"));
 				listen.on("exit", code => session === current && ctx.ui.notify(`letmeknow stopped (exit ${code}): ${errors.trim()}`, "error"));
-				createInterface({ input: listen.stdout! }).on("line", line => session === current && JSON.parse(line).type !== "ready" && notify(line));
+				createInterface({ input: listen.stdout! }).on("line", line => {
+					if (session !== current) return;
+					const event = JSON.parse(line);
+					if (event.type !== "ready") return notify(line);
+					current.fp = event.fp;
+					ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
+				});
 			},
 			error => ctx.ui.notify(`letmeknow: ${error.message}`, "error")
 		);
@@ -141,7 +146,8 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", event => {
 		if (!session) return;
-		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}, which runs already: what it prints reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
+		const fp = session.fp ? ` (fingerprint ${session.fp}, as other members know it)` : "";
+		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}${fp}, which runs already: what it prints reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
