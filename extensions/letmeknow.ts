@@ -144,18 +144,14 @@ export default function (pi: ExtensionAPI): void {
 		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}, which runs already: what it prints reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", (_event, ctx) => {
 		if (!session) return;
-		const { handle, listen, executable } = session;
+		const { listen } = session;
 		session = undefined;
 		delete claim.piLetmeknow;
 		delete process.env.LETMEKNOW_SESSION;
 		ctx.ui.setStatus("letmeknow", undefined);
-		// One whose letmeknow had not started yet has nothing to stop.
-		if (!listen) return;
-		listen.kill();
-		const binary = await executable;
-		const { sessions } = JSON.parse((await run(binary, ["sessions"])).stdout) as { sessions: { handle: string; groups: unknown[] }[] };
-		if (sessions.some(s => s.handle === handle && !s.groups.length)) await run(binary, ["sessions", "remove", handle]);
+		// One whose letmeknow had not started yet has nothing to stop; letmeknow deletes one that stops in no group.
+		listen?.kill();
 	});
 }

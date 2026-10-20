@@ -16,7 +16,7 @@ const home = await mkdtemp(join(tmpdir(), "pi-letmeknow-test-"));
 const target = `${process.platform}-${process.arch}`;
 const cache = join(home, ".cache", "pi-letmeknow");
 const executable = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
-let versions, requests, calls, listeners, notices, groups, offline, afterExtract;
+let versions, requests, calls, listeners, notices, offline, afterExtract;
 const archives = new Map();
 
 mock.module("node:os", { namedExports: { homedir: () => home } });
@@ -31,7 +31,6 @@ mock.module("node:child_process", {
 				calls.push(call);
 				const running = (async () => {
 					const version = await readFile(file, "utf8");
-					if (args[0] === "sessions") return { stdout: JSON.stringify({ sessions: groups }) };
 					const kind = await readFile(join(dirname(file), "kind"), "utf8");
 					const skill = await readFile(join(dirname(file), "..", "skills", "SKILL.md"), "utf8");
 					return { stdout: `${version}: ${kind}: ${skill}` };
@@ -59,7 +58,6 @@ beforeEach(async () => {
 	calls = [];
 	listeners = [];
 	notices = [];
-	groups = [];
 	offline = false;
 	afterExtract = () => {};
 	delete globalThis.piLetmeknow;
@@ -139,7 +137,7 @@ test("publishes the entire package at an immutable platform/full-version path an
 	assert.deepEqual(await readdir(join(cache, target)), ["0.23.10"]);
 });
 
-test("new patch startup leaves old listener, skill, plugin, tool and shutdown bound to their package", async () => {
+test("new patch startup leaves old listener, skill, plugin and tool bound to their package", async () => {
 	const oldBinary = await release("0.23.1", { kind: "old kind", retired: "retired plugin" });
 	const old = start("");
 	assert.equal(await old.ready, undefined);
@@ -158,16 +156,12 @@ test("new patch startup leaves old listener, skill, plugin, tool and shutdown bo
 	assert.equal((await newer.command(["skill"])).content[0].text, "0.23.2: kind 0.23.2: skill 0.23.2");
 	assert.equal(await readFile(join(dirname(oldBinary), "retired"), "utf8"), "retired plugin");
 	assert.equal(existsSync(join(dirname(newBinary), "retired")), false);
-	groups = [{ handle, groups: [] }, { handle: other, groups: ["a group"] }];
+	const commands = calls.length;
 	await old.shutdown();
-	assert.equal(listeners[0].child.killed, true);
-	assert.deepEqual(calls.slice(-2).map(({ file, args }) => ({ file, args })), [
-		{ file: oldBinary, args: ["sessions"] },
-		{ file: oldBinary, args: ["sessions", "remove", handle] },
-	]);
+	assert.deepEqual([listeners[0].child.killed, listeners[1].child.killed], [true, undefined]);
 	await newer.shutdown();
-	assert.deepEqual(calls.at(-1), { file: newBinary, args: ["sessions"] }, "one in a group stays");
 	assert.equal(listeners[1].child.killed, true);
+	assert.equal(calls.length, commands, "shutdown runs no command");
 });
 
 test("concurrent same-version installers publish only complete packages", async () => {
