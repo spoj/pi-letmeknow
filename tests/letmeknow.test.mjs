@@ -50,7 +50,7 @@ mock.module("node:child_process", {
 				kill: () => { child.killed = true; },
 			});
 			listeners.push({ file, args, child });
-			child.stdout.write(`${JSON.stringify({ type: "ready", handle: args[1], fp: "0123456789abcdef" })}\n`);
+			child.stdout.write(`${JSON.stringify({ type: "ready", fp: args[0] === "--session" ? args[1] : `${listeners.length}123456789abcdef` })}\n`);
 			return child;
 		},
 	},
@@ -159,13 +159,12 @@ test("new patch startup leaves old listener, skill, plugin and tool bound to the
 	const newer = start();
 	assert.equal(await newer.ready, undefined);
 	assert.deepEqual(listeners.map(item => item.file), [oldBinary, newBinary]);
-	const [handle, other] = listeners.map(item => item.args[1]);
-	assert.match(handle, /^pi-[0-9a-f]{8}$/);
-	assert.notEqual(handle, other, "each Pi session is a new letmeknow session");
+	assert.deepEqual(listeners.map(item => item.args), [["listen"], ["listen"]], "each Pi session is a new letmeknow session");
+	assert.equal(process.env.LETMEKNOW_SESSION, "2123456789abcdef");
 	for (const args of [["skill"], ["kind", "read"], ["send", "--to", "someone", "-"]]) {
 		assert.equal((await old.command(args, "input")).content[0].text, "0.23.1: old kind: skill 0.23.1");
 		assert.equal(calls.at(-1).file, oldBinary);
-		assert.deepEqual(calls.at(-1).args, ["--session", handle, ...args]);
+		assert.deepEqual(calls.at(-1).args, ["--session", "1123456789abcdef", ...args]);
 	}
 	assert.equal((await newer.command(["skill"])).content[0].text, "0.23.2: kind 0.23.2: skill 0.23.2");
 	assert.equal(await readFile(join(dirname(oldBinary), "retired"), "utf8"), "retired plugin");
@@ -220,8 +219,8 @@ test("the status line and system prompt give the session's fingerprint once it i
 	const session = start();
 	assert.doesNotMatch(session.systemPrompt(), /fingerprint/);
 	assert.equal(await session.ready, undefined);
-	assert.equal(session.status(), "lmk:0123456789abcdef");
-	assert.match(session.systemPrompt(), /^You are in letmeknow as its session pi-[0-9a-f]{8} \(fingerprint 0123456789abcdef, as other members know it\),/);
+	assert.equal(session.status(), "lmk:1123456789abcdef");
+	assert.match(session.systemPrompt(), /^You are in letmeknow as its session 1123456789abcdef, as other members know it, in a session that runs already:/);
 });
 
 test("tools await selection, and shutdown during installation never launches a listener or command", async () => {
@@ -343,8 +342,8 @@ test("a new session joins the listed groups it is not in, through a running sibl
 			return Object.assign(new Error("failed"), { stderr: "letmeknow: behind: the group moved on" });
 		}
 		if (args[0] === "sessions") return { sessions: [
-			{ handle: "stopped", groups: ["G1", "G2"] },
-			{ handle: "running", running: true, groups: ["G1"] },
+			{ fp: "stopped", groups: ["G1", "G2"] },
+			{ fp: "running", running: true, groups: ["G1"] },
 		] };
 		if (args[2] === "invite") return { link: `link-${args[1]}-${args[4]}` };
 		if (args[2] === "join" && args[3] === "link-stopped-G2") joined.resolve();
@@ -354,13 +353,13 @@ test("a new session joins the listed groups it is not in, through a running sibl
 	await session.ready;
 	await joined.promise;
 	const commands = calls.map(call => call.args.join(" ")).filter(args => !args.endsWith(" listen"));
-	const me = listeners[0].args[1];
+	const me = "1123456789abcdef";
 	assert.deepEqual(commands, [
 		"sessions",
 		"--session running invite --group G1", `--session ${me} join link-running-G1`,
 		"--session stopped invite --group G2", "--session stopped invite --group G2", `--session ${me} join link-stopped-G2`,
 	]);
-	assert.deepEqual(listeners.map(item => item.args.join(" ")), [`--session ${me} listen`, "--session stopped listen"]);
+	assert.deepEqual(listeners.map(item => item.args.join(" ")), ["listen", "--session stopped listen"]);
 	await new Promise(resolve => setTimeout(resolve, 10));
 	assert.equal(listeners[1].child.killed, true);
 	assert.deepEqual(notices.filter(n => n.level === "warning").map(n => n.message), ["letmeknow: cannot join G3 through a session of this machine"]);
