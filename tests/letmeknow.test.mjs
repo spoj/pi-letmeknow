@@ -16,7 +16,7 @@ const home = await mkdtemp(join(tmpdir(), "pi-letmeknow-test-"));
 const target = `${process.platform}-${process.arch}`;
 const cache = join(home, ".cache", "pi-letmeknow");
 const executable = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
-let versions, requests, calls, listeners, notices, offline, afterExtract;
+let versions, requests, calls, listeners, notices, offline, afterExtract, answer;
 const archives = new Map();
 
 mock.module("node:os", { namedExports: { homedir: () => home } });
@@ -30,6 +30,7 @@ mock.module("node:child_process", {
 				const call = { file, args };
 				calls.push(call);
 				const running = (async () => {
+					if (answer) return { stdout: JSON.stringify(answer(args)) };
 					const version = await readFile(file, "utf8");
 					const kind = await readFile(join(dirname(file), "kind"), "utf8");
 					const skill = await readFile(join(dirname(file), "..", "skills", "SKILL.md"), "utf8");
@@ -61,6 +62,8 @@ beforeEach(async () => {
 	notices = [];
 	offline = false;
 	afterExtract = () => {};
+	answer = undefined;
+	await rm(join(home, ".pi"), { recursive: true, force: true });
 	delete globalThis.piLetmeknow;
 	mock.method(globalThis, "fetch", async url => {
 		requests.push(url);
@@ -322,4 +325,35 @@ test("failed extraction cleans staging without publishing a partial package", as
 	assert.equal(existsSync(binary), false);
 	assert.deepEqual(await readdir(join(cache, target)), []);
 	assert.equal(listeners.length, 0);
+});
+
+test("a new session joins the listed groups it is not in, through a running sibling first, else a stopped one it runs meanwhile", async () => {
+	await release("0.23.9");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1", "G2", "G3"] }));
+	const joined = Promise.withResolvers();
+	answer = args => {
+		if (args[0] === "sessions") return { sessions: [
+			{ handle: "stopped", groups: ["G1", "G2"] },
+			{ handle: "running", running: true, groups: ["G1"] },
+		] };
+		if (args[2] === "invite") return { link: `link-${args[1]}-${args[4]}` };
+		if (args[2] === "join" && args[3] === "link-stopped-G2") joined.resolve();
+		return {};
+	};
+	const session = start();
+	await session.ready;
+	await joined.promise;
+	const commands = calls.map(call => call.args.join(" ")).filter(args => !args.endsWith(" listen"));
+	const me = listeners[0].args[1];
+	assert.deepEqual(commands, [
+		"sessions",
+		"--session running invite --group G1", `--session ${me} join link-running-G1`,
+		"--session stopped invite --group G2", `--session ${me} join link-stopped-G2`,
+	]);
+	assert.deepEqual(listeners.map(item => item.args.join(" ")), [`--session ${me} listen`, "--session stopped listen"]);
+	await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(listeners[1].child.killed, true);
+	assert.deepEqual(notices.filter(n => n.level === "warning").map(n => n.message), ["letmeknow: cannot join G3 through a session of this machine"]);
+	await session.shutdown();
 });

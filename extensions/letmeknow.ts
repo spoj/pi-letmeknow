@@ -1,5 +1,5 @@
 // Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as a new letmeknow session
-// with a short random handle, which goes when the Pi session ends in no group. It runs letmeknow's own
+// with a short random handle, which joins the groups of ~/.pi/agent/letmeknow.json and goes when the Pi session ends in no group. It runs letmeknow's own
 // binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. The
 // letmeknow session logs every event and prints what concerns the agent: those lines reach the agent as one message that
 // starts a turn, once none came for a moment; its `ready` only gives the session's fingerprint and log, which the system
@@ -7,7 +7,7 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { access, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -20,6 +20,8 @@ const TARGET = `${process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
 const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
 const run = promisify(execFile);
+// The groups each new session joins as it starts, by id: `{ "join": ["<group id>"] }`.
+const JOIN = join(homedir(), ".pi", "agent", "letmeknow.json");
 // How long the lines the session prints wait for more before they wake the agent together.
 const DEBOUNCE = 2000;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
@@ -72,6 +74,52 @@ async function install(warn: (message: string) => void): Promise<string> {
 		await rm(tmp, { recursive: true });
 	}
 	return executable;
+}
+
+async function letmeknow(executable: string, args: string[]): Promise<Record<string, any>> {
+	return JSON.parse((await run(executable, args)).stdout);
+}
+
+// An invite into `group` from `sibling`, another session of this machine in it: a running one, or a stopped one that runs
+// only until `use` is done with the link.
+async function inviteFrom(executable: string, sibling: { handle: string; running?: boolean }, group: string, use: (link: string) => Promise<unknown>): Promise<void> {
+	const invite = ["--session", sibling.handle, "invite", "--group", group];
+	if (sibling.running) return void (await use((await letmeknow(executable, invite)).link));
+	const listen = spawn(executable, ["--session", sibling.handle, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
+	try {
+		await new Promise<void>((resolve, reject) => {
+			let errors = "";
+			listen.stderr!.on("data", chunk => (errors += chunk));
+			listen.on("exit", code => reject(new Error(`session ${sibling.handle} stopped (exit ${code}): ${errors.trim()}`)));
+			createInterface({ input: listen.stdout! }).on("line", line => JSON.parse(line).type === "ready" && resolve());
+		});
+		await use((await letmeknow(executable, invite)).link);
+	} finally {
+		listen.kill();
+	}
+}
+
+// Joins `handle` to each group of JOIN it is not in, through a sibling: a running one first.
+async function joinListed(executable: string, handle: string): Promise<string[]> {
+	if (!existsSync(JOIN)) return [];
+	const { join: groups } = JSON.parse(await readFile(JOIN, "utf8")) as { join: string[] };
+	const { sessions } = (await letmeknow(executable, ["sessions"])) as { sessions: { handle: string; running?: boolean; groups?: string[] }[] };
+	const warnings: string[] = [];
+	for (const group of groups) {
+		if (sessions.find(s => s.handle === handle)?.groups?.includes(group)) continue;
+		const siblings = sessions.filter(s => s.handle !== handle && s.groups?.includes(group)).sort((a, b) => Number(!!b.running) - Number(!!a.running));
+		const failures: string[] = [];
+		for (const sibling of siblings) {
+			try {
+				await inviteFrom(executable, sibling, group, link => letmeknow(executable, ["--session", handle, "join", link]));
+				break;
+			} catch (error) {
+				failures.push(`${sibling.handle}: ${(error as { stderr?: string }).stderr?.trim() || (error as Error).message}`);
+			}
+		}
+		if (failures.length === siblings.length) warnings.push(`letmeknow: cannot join ${group} through a session of this machine${failures.length ? ` (${failures.join("; ")})` : ""}`);
+	}
+	return warnings;
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -154,6 +202,10 @@ export default function (pi: ExtensionAPI): void {
 					current.fp = event.fp;
 					current.log = event.log;
 					ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
+					joinListed(executable, handle).then(
+						warnings => warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
+						error => ctx.ui.notify(`letmeknow: joining the groups of ${JOIN}: ${error.message}`, "warning")
+					);
 				});
 			},
 			error => ctx.ui.notify(`letmeknow: ${error.message}`, "error")
