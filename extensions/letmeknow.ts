@@ -1,8 +1,9 @@
 // Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as a new letmeknow session
 // with a short random handle, which goes when the Pi session ends in no group. It runs letmeknow's own
-// binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. What
-// the letmeknow session prints reaches the agent as a message that starts a turn; its `ready` only gives the session's
-// fingerprint, which the system prompt and status line show, as other members know the session by it. The agent's `letmeknow` tool runs the same binary for its commands.
+// binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. The
+// letmeknow session logs every event and prints what concerns the agent: those lines reach the agent as one message that
+// starts a turn, once none came for a moment; its `ready` only gives the session's fingerprint and log, which the system
+// prompt shows, and the status line the fingerprint, as other members know the session by it. The agent's `letmeknow` tool runs the same binary for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -19,6 +20,8 @@ const TARGET = `${process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
 const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
 const run = promisify(execFile);
+// How long the lines the session prints wait for more before they wake the agent together.
+const DEBOUNCE = 2000;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
 // process loads, the first to start a session puts it in letmeknow, until that session ends.
 const claim = globalThis as { piLetmeknow?: true };
@@ -72,8 +75,20 @@ async function install(warn: (message: string) => void): Promise<string> {
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { handle: string; executable: Promise<string>; listen?: ChildProcess; fp?: string } | undefined;
+	let session: { handle: string; executable: Promise<string>; listen?: ChildProcess; fp?: string; log?: string } | undefined;
 	let pending: TextContent[] | undefined;
+	let waiting: string[] = [];
+	let timer: NodeJS.Timeout | undefined;
+
+	function wake(line: string): void {
+		waiting.push(line);
+		clearTimeout(timer);
+		timer = setTimeout(() => {
+			const lines = waiting;
+			waiting = [];
+			notify(lines.join("\n"));
+		}, DEBOUNCE);
+	}
 
 	function notify(text: string): void {
 		const queued = pending !== undefined;
@@ -135,8 +150,9 @@ export default function (pi: ExtensionAPI): void {
 				createInterface({ input: listen.stdout! }).on("line", line => {
 					if (session !== current) return;
 					const event = JSON.parse(line);
-					if (event.type !== "ready") return notify(line);
+					if (event.type !== "ready") return wake(line);
 					current.fp = event.fp;
+					current.log = event.log;
 					ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
 				});
 			},
@@ -147,13 +163,16 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("before_agent_start", event => {
 		if (!session) return;
 		const fp = session.fp ? ` (fingerprint ${session.fp}, as other members know it)` : "";
-		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}${fp}, which runs already: what it prints reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
+		const log = session.log ? ` it logs every event to ${session.log}, which you read at your own pace, and` : "";
+		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow as its session ${session.handle}${fp}, which runs already:${log} what concerns you reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (!session) return;
 		const { listen } = session;
 		session = undefined;
+		clearTimeout(timer);
+		waiting = [];
 		delete claim.piLetmeknow;
 		delete process.env.LETMEKNOW_SESSION;
 		ctx.ui.setStatus("letmeknow", undefined);
