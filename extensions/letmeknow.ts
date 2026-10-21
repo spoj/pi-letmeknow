@@ -83,8 +83,18 @@ async function letmeknow(executable: string, args: string[]): Promise<Record<str
 // An invite into `group` from `sibling`, another session of this machine in it: a running one, or a stopped one that runs
 // only until `use` is done with the link.
 async function inviteFrom(executable: string, sibling: { handle: string; running?: boolean }, group: string, use: (link: string) => Promise<unknown>): Promise<void> {
-	const invite = ["--session", sibling.handle, "invite", "--group", group];
-	if (sibling.running) return void (await use((await letmeknow(executable, invite)).link));
+	const args = ["--session", sibling.handle, "invite", "--group", group];
+	// One back from a while away answers `behind` until it has caught up with the group, for up to about two minutes.
+	const invite = async (): Promise<string> => {
+		for (let tries = 1; ; tries++) {
+			try {
+				return (await letmeknow(executable, args)).link;
+			} catch (error) {
+				if (tries === 20 || !(error as { stderr?: string }).stderr?.includes("behind")) throw error;
+			}
+		}
+	};
+	if (sibling.running) return void (await use(await invite()));
 	const listen = spawn(executable, ["--session", sibling.handle, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
 	try {
 		await new Promise<void>((resolve, reject) => {
@@ -93,7 +103,7 @@ async function inviteFrom(executable: string, sibling: { handle: string; running
 			listen.on("exit", code => reject(new Error(`session ${sibling.handle} stopped (exit ${code}): ${errors.trim()}`)));
 			createInterface({ input: listen.stdout! }).on("line", line => JSON.parse(line).type === "ready" && resolve());
 		});
-		await use((await letmeknow(executable, invite)).link);
+		await use(await invite());
 	} finally {
 		listen.kill();
 	}

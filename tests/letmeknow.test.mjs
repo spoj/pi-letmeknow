@@ -30,7 +30,11 @@ mock.module("node:child_process", {
 				const call = { file, args };
 				calls.push(call);
 				const running = (async () => {
-					if (answer) return { stdout: JSON.stringify(answer(args)) };
+					if (answer) {
+						const answered = answer(args);
+						if (answered instanceof Error) throw answered;
+						return { stdout: JSON.stringify(answered) };
+					}
 					const version = await readFile(file, "utf8");
 					const kind = await readFile(join(dirname(file), "kind"), "utf8");
 					const skill = await readFile(join(dirname(file), "..", "skills", "SKILL.md"), "utf8");
@@ -327,12 +331,17 @@ test("failed extraction cleans staging without publishing a partial package", as
 	assert.equal(listeners.length, 0);
 });
 
-test("a new session joins the listed groups it is not in, through a running sibling first, else a stopped one it runs meanwhile", async () => {
+test("a new session joins the listed groups it is not in, through a running sibling first, else a stopped one it runs meanwhile until it has caught up", async () => {
 	await release("0.23.9");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1", "G2", "G3"] }));
 	const joined = Promise.withResolvers();
+	let behind = true;
 	answer = args => {
+		if (args[1] === "stopped" && args[2] === "invite" && behind) {
+			behind = false;
+			return Object.assign(new Error("failed"), { stderr: "letmeknow: behind: the group moved on" });
+		}
 		if (args[0] === "sessions") return { sessions: [
 			{ handle: "stopped", groups: ["G1", "G2"] },
 			{ handle: "running", running: true, groups: ["G1"] },
@@ -349,7 +358,7 @@ test("a new session joins the listed groups it is not in, through a running sibl
 	assert.deepEqual(commands, [
 		"sessions",
 		"--session running invite --group G1", `--session ${me} join link-running-G1`,
-		"--session stopped invite --group G2", `--session ${me} join link-stopped-G2`,
+		"--session stopped invite --group G2", "--session stopped invite --group G2", `--session ${me} join link-stopped-G2`,
 	]);
 	assert.deepEqual(listeners.map(item => item.args.join(" ")), [`--session ${me} listen`, "--session stopped listen"]);
 	await new Promise(resolve => setTimeout(resolve, 10));
