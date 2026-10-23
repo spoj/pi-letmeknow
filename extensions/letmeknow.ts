@@ -1,9 +1,11 @@
 // Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as a new letmeknow session
-// known by its fingerprint, which joins the groups of ~/.pi/agent/letmeknow.json and goes when the Pi session ends in no group. It runs letmeknow's own
-// binary, the newest release of the minor version it speaks, which it fetches from npm into ~/.cache/pi-letmeknow. The
-// letmeknow session logs every event and prints what concerns the agent: those lines reach the agent as one message that
-// starts a turn, once none came for a moment; its `ready` only gives the session's fingerprint and log, which the system
-// prompt shows, and the status line the fingerprint, as other members know the session by it. The agent's `letmeknow` tool runs the same binary for its commands.
+// known by its fingerprint, which joins the groups of ~/.pi/agent/letmeknow.json and goes when the Pi session ends in no group;
+// or as the session that file names to attach to, which runs on its own, while no other Pi session is attached to it. It runs
+// letmeknow's own binary, the newest release of the minor version it speaks, which it fetches from npm into
+// ~/.cache/pi-letmeknow. The letmeknow session logs every event and prints what concerns the agent: those lines reach the
+// agent as one message that starts a turn, once none came for a moment; its `ready` only gives the session's fingerprint,
+// program and log, which the system prompt shows, and the status line the fingerprint, as other members know the session
+// by it. The agent's `letmeknow` tool runs the session's program for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -20,8 +22,9 @@ const TARGET = `${process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
 const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
 const run = promisify(execFile);
-// The groups each new session joins as it starts, by id: `{ "join": ["<group id>"] }`.
-const JOIN = join(homedir(), ".pi", "agent", "letmeknow.json");
+// The groups each session joins as it starts, by id, and the session to attach to rather than start a new one, by
+// fingerprint: `{ "join": ["<group id>"], "attach": "<fp>" }`.
+const SETTINGS = join(homedir(), ".pi", "agent", "letmeknow.json");
 // How long the lines the session prints wait for more before they wake the agent together.
 const DEBOUNCE = 2000;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
@@ -110,10 +113,9 @@ async function inviteFrom(executable: string, sibling: { fp: string; running?: b
 	}
 }
 
-// Joins the session `fp` to each group of JOIN it is not in, through a sibling: a running one first; until `signal` aborts.
-async function joinListed(executable: string, fp: string, signal: AbortSignal): Promise<string[]> {
-	if (!existsSync(JOIN)) return [];
-	const { join: groups } = JSON.parse(await readFile(JOIN, "utf8")) as { join: string[] };
+// Joins the session `fp` to each of `groups` it is not in, through a sibling: a running one first; until `signal` aborts.
+async function joinListed(executable: string, fp: string, groups: string[], signal: AbortSignal): Promise<string[]> {
+	if (!groups.length) return [];
 	const { sessions } = (await letmeknow(executable, ["sessions"])) as { sessions: { fp: string; running?: boolean; groups?: string[] }[] };
 	const warnings: string[] = [];
 	for (const group of groups) {
@@ -135,7 +137,7 @@ async function joinListed(executable: string, fp: string, signal: AbortSignal): 
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { executable: Promise<string>; ready: Promise<string>; settle: { resolve: (fp: string) => void; reject: (error: Error) => void }; stop: AbortController; listen?: ChildProcess; fp?: string; log?: string } | undefined;
+	let session: { executable: Promise<string>; ready: Promise<string>; settle: { resolve: (fp: string) => void; reject: (error: Error) => void }; stop: AbortController; listen?: ChildProcess; fp?: string; bin?: string; log?: string; attached?: boolean } | undefined;
 	let pending: TextContent[] | undefined;
 	let waiting: string[] = [];
 	let timer: NodeJS.Timeout | undefined;
@@ -178,10 +180,9 @@ export default function (pi: ExtensionAPI): void {
 			// A Pi session that followed one in letmeknow, in the same process, may be in none.
 			if (!session) throw new Error("this Pi session is not in letmeknow");
 			const current = session;
-			const executable = await current.executable;
 			const fp = await current.ready;
 			if (session !== current) throw new Error("this Pi session has left letmeknow");
-			const running = run(executable, ["--session", fp, ...args], { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
+			const running = run(current.bin!, ["--session", fp, ...args], { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
 			running.child.stdin!.end(input ?? "");
 			try {
 				return { content: [{ type: "text", text: (await running).stdout }], details: undefined };
@@ -201,34 +202,49 @@ export default function (pi: ExtensionAPI): void {
 		ready.catch(() => {});
 		const current: NonNullable<typeof session> = { executable: install(message => ctx.ui.notify(message, "warning")), ready, settle, stop: new AbortController() };
 		session = current;
-		current.executable.then(
-			executable => {
+		const settings: Promise<{ join?: string[]; attach?: string }> = existsSync(SETTINGS) ? readFile(SETTINGS, "utf8").then(JSON.parse) : Promise.resolve({});
+		Promise.all([current.executable, settings]).then(
+			([executable, { join: groups = [], attach }]) => {
 				if (session !== current) return;
 				// A new session, not the one a parent Pi's LETMEKNOW_SESSION names.
 				const { LETMEKNOW_SESSION: _, ...env } = process.env;
-				const listen = spawn(executable, ["listen"], { stdio: ["ignore", "pipe", "pipe"], env });
-				current.listen = listen;
-				let errors = "";
-				listen.stderr!.on("data", chunk => (errors = (errors + chunk).slice(-2000)));
-				listen.on("error", error => ctx.ui.notify(`letmeknow: ${error.message}`, "error"));
-				listen.on("exit", code => {
-					current.settle.reject(new Error(`letmeknow stopped (exit ${code}): ${errors.trim()}`));
-					if (session === current) ctx.ui.notify(`letmeknow stopped (exit ${code}): ${errors.trim()}`, "error");
-				});
-				createInterface({ input: listen.stdout! }).on("line", line => {
-					if (session !== current) return;
-					const event = JSON.parse(line);
-					if (event.type !== "ready") return wake(line);
-					current.fp = event.fp;
-					current.log = event.log;
-					process.env.LETMEKNOW_SESSION = event.fp;
-					current.settle.resolve(event.fp);
-					ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
-					// One that ended meanwhile stopped the join, and its ctx is stale.
-					joinListed(executable, event.fp, current.stop.signal).then(
-						warnings => session === current && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
-						error => session === current && ctx.ui.notify(`letmeknow: joining the groups of ${JOIN}: ${error.message}`, "warning")
-					);
+				const stopped = (code: number | null, errors: string) => {
+					current.settle.reject(new Error(`letmeknow stopped (exit ${code}): ${errors}`));
+					if (session === current) ctx.ui.notify(`letmeknow stopped (exit ${code}): ${errors}`, "error");
+				};
+				// Runs `listen` or `attach`, `args`: what it prints reaches the agent, and its `ready` names the session.
+				const start = (args: string[], exited: typeof stopped) => {
+					const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"], env });
+					current.listen = child;
+					let errors = "";
+					child.stderr!.on("data", chunk => (errors = (errors + chunk).slice(-2000)));
+					child.on("error", error => ctx.ui.notify(`letmeknow: ${error.message}`, "error"));
+					child.on("exit", code => exited(code, errors.trim()));
+					createInterface({ input: child.stdout! }).on("line", line => {
+						if (session !== current) return;
+						const event = JSON.parse(line);
+						if (event.type !== "ready") return wake(line);
+						// An attached session's comes again as it runs again, with the program it runs then.
+						current.fp = event.fp;
+						current.bin = event.bin;
+						current.log = event.log;
+						current.attached = args.includes("attach");
+						process.env.LETMEKNOW_SESSION = event.fp;
+						current.settle.resolve(event.fp);
+						ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
+						// One that ended meanwhile stopped the join, and its ctx is stale.
+						joinListed(executable, event.fp, groups, current.stop.signal).then(
+							warnings => session === current && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
+							error => session === current && ctx.ui.notify(`letmeknow: joining the groups of ${SETTINGS}: ${error.message}`, "warning")
+						);
+					});
+				};
+				if (!attach) return start(["listen"], stopped);
+				// One that has a reader already, or does not run, leaves this Pi session a new letmeknow session.
+				start(["--session", attach, "attach"], (code, errors) => {
+					if (current.fp || session !== current) return stopped(code, errors);
+					ctx.ui.notify(`letmeknow: not attached to ${attach} (${errors}); this Pi session is a new letmeknow session`, "info");
+					start(["listen"], stopped);
 				});
 			},
 			error => {
@@ -242,7 +258,8 @@ export default function (pi: ExtensionAPI): void {
 		if (!session) return;
 		const fp = session.fp ? ` as its session ${session.fp}, as other members know it,` : "";
 		const log = session.log ? ` it logs every event to ${session.log}, which you read at your own pace, and` : "";
-		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow${fp} in a session that runs already:${log} what concerns you reaches you as messages, and only what you send with it reaches anyone. Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
+		const attached = session.attached ? " It runs on beyond this Pi session, which attached to it: earlier Pi sessions may have spoken as it, and its log holds what they heard." : "";
+		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow${fp} in a session that runs already:${log} what concerns you reaches you as messages, and only what you send with it reaches anyone.${attached} Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {

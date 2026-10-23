@@ -16,7 +16,7 @@ const home = await mkdtemp(join(tmpdir(), "pi-letmeknow-test-"));
 const target = `${process.platform}-${process.arch}`;
 const cache = join(home, ".cache", "pi-letmeknow");
 const executable = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
-let versions, requests, calls, listeners, notices, offline, afterExtract, answer;
+let versions, requests, calls, listeners, notices, offline, afterExtract, answer, refuse;
 const archives = new Map();
 
 mock.module("node:os", { namedExports: { homedir: () => home } });
@@ -55,7 +55,14 @@ mock.module("node:child_process", {
 				child.emit("error", new Error("aborted"));
 			});
 			listeners.push({ file, args, child });
-			child.stdout.write(`${JSON.stringify({ type: "ready", fp: args[0] === "--session" ? args[1] : `${listeners.length}123456789abcdef` })}\n`);
+			const refused = refuse?.(args);
+			if (refused) {
+				child.stderr.write(refused);
+				setImmediate(() => child.emit("exit", 1));
+			} else {
+				const fp = args[0] === "--session" ? args[1] : `${listeners.length}123456789abcdef`;
+				child.stdout.write(`${JSON.stringify({ type: "ready", fp, bin: args.at(-1) === "attach" ? "/detached/letmeknow" : file })}\n`);
+			}
 			return child;
 		},
 	},
@@ -72,6 +79,7 @@ beforeEach(async () => {
 	offline = false;
 	afterExtract = () => {};
 	answer = undefined;
+	refuse = undefined;
 	await rm(join(home, ".pi"), { recursive: true, force: true });
 	delete globalThis.piLetmeknow;
 	mock.method(globalThis, "fetch", async url => {
@@ -238,8 +246,10 @@ test("tools await selection, and shutdown during installation never launches a l
 	await extracted.promise;
 	assert.equal(calls.length, 0);
 	await session.shutdown();
-	resume.resolve();
 	await assert.rejects(command, /has left letmeknow/);
+	resume.resolve();
+	// The installation goes on to publish the package.
+	await new Promise(resolve => setTimeout(resolve, 20));
 	assert.equal(listeners.length, 0);
 	assert.equal(calls.length, 0);
 	assert.equal(existsSync(binary), true);
@@ -369,6 +379,43 @@ test("a new session joins the listed groups it is not in, through a running sibl
 	assert.equal(listeners[1].child.killed, true);
 	assert.deepEqual(notices.filter(n => n.level === "warning").map(n => n.message), ["letmeknow: cannot join G3 through a session of this machine"]);
 	await session.shutdown();
+});
+
+test("a Pi session attaches to the session letmeknow.json names, as its reader, and runs its commands with that session's program", async () => {
+	await release("0.23.13");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ attach: "fedcba9876543210" }));
+	answer = () => ({});
+	const session = start();
+	assert.equal(await session.ready, undefined);
+	assert.deepEqual(listeners.map(item => item.args), [["--session", "fedcba9876543210", "attach"]]);
+	assert.equal(session.status(), "lmk:fedcba9876543210");
+	assert.match(session.systemPrompt(), /^You are in letmeknow as its session fedcba9876543210,.* It runs on beyond this Pi session, which attached to it:/);
+	await session.command(["groups"]);
+	assert.deepEqual(calls, [{ file: "/detached/letmeknow", args: ["--session", "fedcba9876543210", "groups"], input: "" }]);
+	// Run again, maybe by a newer program, the session says so in a new `ready`.
+	listeners[0].child.stdout.write(`${JSON.stringify({ type: "ready", fp: "fedcba9876543210", bin: "/detached/newer" })}\n`);
+	await new Promise(resolve => setTimeout(resolve, 10));
+	await session.command(["groups"]);
+	assert.equal(calls.at(-1).file, "/detached/newer");
+	await session.shutdown();
+	assert.equal(listeners[0].child.killed, true, "ending the Pi session only stops its reading");
+});
+
+test("a Pi session whose session to attach to has a reader already is a new letmeknow session", async () => {
+	await release("0.23.13");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ attach: "fedcba9876543210" }));
+	refuse = args => args.at(-1) === "attach" && "letmeknow: session fedcba9876543210 has a reader attached already\n";
+	const session = start();
+	assert.equal(await session.ready, undefined);
+	assert.deepEqual(listeners.map(item => item.args), [["--session", "fedcba9876543210", "attach"], ["listen"]]);
+	assert.equal(session.status(), "lmk:2123456789abcdef");
+	assert.doesNotMatch(session.systemPrompt(), /attached/);
+	assert.deepEqual(notices.map(n => n.level), ["info"]);
+	assert.match(notices[0].message, /not attached to fedcba9876543210 \(letmeknow: session fedcba9876543210 has a reader attached already\)/);
+	await session.shutdown();
+	assert.equal(listeners[1].child.killed, true);
 });
 
 test("a Pi session that ends during a join stops the sibling it runs meanwhile, and joins no further", async () => {
