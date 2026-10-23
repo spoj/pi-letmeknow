@@ -81,8 +81,8 @@ async function letmeknow(executable: string, args: string[]): Promise<Record<str
 }
 
 // An invite into `group` from `sibling`, another session of this machine in it: a running one, or a stopped one that runs
-// only until `use` is done with the link.
-async function inviteFrom(executable: string, sibling: { fp: string; running?: boolean }, group: string, use: (link: string) => Promise<unknown>): Promise<void> {
+// only until `use` is done with the link, or `signal` aborts as the Pi session ends.
+async function inviteFrom(executable: string, sibling: { fp: string; running?: boolean }, group: string, use: (link: string) => Promise<unknown>, signal: AbortSignal): Promise<void> {
 	const args = ["--session", sibling.fp, "invite", "--group", group];
 	// One back from a while away answers `behind` until it has caught up with the group, for up to about two minutes.
 	const invite = async (): Promise<string> => {
@@ -95,11 +95,12 @@ async function inviteFrom(executable: string, sibling: { fp: string; running?: b
 		}
 	};
 	if (sibling.running) return void (await use(await invite()));
-	const listen = spawn(executable, ["--session", sibling.fp, "listen"], { stdio: ["ignore", "pipe", "pipe"] });
+	const listen = spawn(executable, ["--session", sibling.fp, "listen"], { stdio: ["ignore", "pipe", "pipe"], signal });
 	try {
 		await new Promise<void>((resolve, reject) => {
 			let errors = "";
 			listen.stderr!.on("data", chunk => (errors += chunk));
+			listen.on("error", reject);
 			listen.on("exit", code => reject(new Error(`session ${sibling.fp} stopped (exit ${code}): ${errors.trim()}`)));
 			createInterface({ input: listen.stdout! }).on("line", line => JSON.parse(line).type === "ready" && resolve());
 		});
@@ -109,8 +110,8 @@ async function inviteFrom(executable: string, sibling: { fp: string; running?: b
 	}
 }
 
-// Joins the session `fp` to each group of JOIN it is not in, through a sibling: a running one first.
-async function joinListed(executable: string, fp: string): Promise<string[]> {
+// Joins the session `fp` to each group of JOIN it is not in, through a sibling: a running one first; until `signal` aborts.
+async function joinListed(executable: string, fp: string, signal: AbortSignal): Promise<string[]> {
 	if (!existsSync(JOIN)) return [];
 	const { join: groups } = JSON.parse(await readFile(JOIN, "utf8")) as { join: string[] };
 	const { sessions } = (await letmeknow(executable, ["sessions"])) as { sessions: { fp: string; running?: boolean; groups?: string[] }[] };
@@ -120,8 +121,9 @@ async function joinListed(executable: string, fp: string): Promise<string[]> {
 		const siblings = sessions.filter(s => s.fp !== fp && s.groups?.includes(group)).sort((a, b) => Number(!!b.running) - Number(!!a.running));
 		const failures: string[] = [];
 		for (const sibling of siblings) {
+			signal.throwIfAborted();
 			try {
-				await inviteFrom(executable, sibling, group, link => letmeknow(executable, ["--session", fp, "join", link]));
+				await inviteFrom(executable, sibling, group, link => letmeknow(executable, ["--session", fp, "join", link]), signal);
 				break;
 			} catch (error) {
 				failures.push(`${sibling.fp}: ${(error as { stderr?: string }).stderr?.trim() || (error as Error).message}`);
@@ -133,7 +135,7 @@ async function joinListed(executable: string, fp: string): Promise<string[]> {
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { executable: Promise<string>; ready: Promise<string>; settle: { resolve: (fp: string) => void; reject: (error: Error) => void }; listen?: ChildProcess; fp?: string; log?: string } | undefined;
+	let session: { executable: Promise<string>; ready: Promise<string>; settle: { resolve: (fp: string) => void; reject: (error: Error) => void }; stop: AbortController; listen?: ChildProcess; fp?: string; log?: string } | undefined;
 	let pending: TextContent[] | undefined;
 	let waiting: string[] = [];
 	let timer: NodeJS.Timeout | undefined;
@@ -197,7 +199,7 @@ export default function (pi: ExtensionAPI): void {
 		const ready = new Promise<string>((resolve, reject) => (settle = { resolve, reject }));
 		// Tools wait for it; one never ready fails them.
 		ready.catch(() => {});
-		const current: NonNullable<typeof session> = { executable: install(message => ctx.ui.notify(message, "warning")), ready, settle };
+		const current: NonNullable<typeof session> = { executable: install(message => ctx.ui.notify(message, "warning")), ready, settle, stop: new AbortController() };
 		session = current;
 		current.executable.then(
 			executable => {
@@ -222,9 +224,10 @@ export default function (pi: ExtensionAPI): void {
 					process.env.LETMEKNOW_SESSION = event.fp;
 					current.settle.resolve(event.fp);
 					ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
-					joinListed(executable, event.fp).then(
-						warnings => warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
-						error => ctx.ui.notify(`letmeknow: joining the groups of ${JOIN}: ${error.message}`, "warning")
+					// One that ended meanwhile stopped the join, and its ctx is stale.
+					joinListed(executable, event.fp, current.stop.signal).then(
+						warnings => session === current && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
+						error => session === current && ctx.ui.notify(`letmeknow: joining the groups of ${JOIN}: ${error.message}`, "warning")
 					);
 				});
 			},
@@ -244,9 +247,11 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (!session) return;
-		const { listen, settle } = session;
+		const { listen, settle, stop } = session;
 		session = undefined;
 		settle.reject(new Error("this Pi session has left letmeknow"));
+		// Stops a sibling run for a join, which would otherwise outlive Pi.
+		stop.abort();
 		clearTimeout(timer);
 		waiting = [];
 		delete claim.piLetmeknow;

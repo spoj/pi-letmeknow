@@ -31,7 +31,7 @@ mock.module("node:child_process", {
 				calls.push(call);
 				const running = (async () => {
 					if (answer) {
-						const answered = answer(args);
+						const answered = await answer(args);
 						if (answered instanceof Error) throw answered;
 						return { stdout: JSON.stringify(answered) };
 					}
@@ -44,10 +44,15 @@ mock.module("node:child_process", {
 				return running;
 			},
 		}),
-		spawn: (file, args) => {
+		spawn: (file, args, options) => {
 			const child = Object.assign(new EventEmitter(), {
 				stdout: new PassThrough(), stderr: new PassThrough(),
 				kill: () => { child.killed = true; },
+			});
+			// As Node does, an abort kills the child and emits an AbortError.
+			options?.signal?.addEventListener("abort", () => {
+				child.kill();
+				child.emit("error", new Error("aborted"));
 			});
 			listeners.push({ file, args, child });
 			child.stdout.write(`${JSON.stringify({ type: "ready", fp: args[0] === "--session" ? args[1] : `${listeners.length}123456789abcdef` })}\n`);
@@ -364,4 +369,27 @@ test("a new session joins the listed groups it is not in, through a running sibl
 	assert.equal(listeners[1].child.killed, true);
 	assert.deepEqual(notices.filter(n => n.level === "warning").map(n => n.message), ["letmeknow: cannot join G3 through a session of this machine"]);
 	await session.shutdown();
+});
+
+test("a Pi session that ends during a join stops the sibling it runs meanwhile, and joins no further", async () => {
+	await release("0.23.9");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1", "G2"] }));
+	const inviting = Promise.withResolvers();
+	const invite = Promise.withResolvers();
+	answer = args => {
+		if (args[0] === "sessions") return { sessions: [{ fp: "stopped", groups: ["G1", "G2"] }] };
+		inviting.resolve();
+		return invite.promise;
+	};
+	const session = start();
+	await session.ready;
+	await inviting.promise;
+	await session.shutdown();
+	assert.deepEqual(listeners.map(item => [item.args.join(" "), item.child.killed]), [["listen", true], ["--session stopped listen", true]]);
+	invite.reject(Object.assign(new Error("failed"), { stderr: "letmeknow: session stopped is not running" }));
+	await new Promise(resolve => setTimeout(resolve, 10));
+	assert.deepEqual(calls.map(call => call.args.join(" ")), ["sessions", "--session stopped invite --group G1"]);
+	assert.equal(listeners.length, 2);
+	assert.deepEqual(notices, []);
 });
