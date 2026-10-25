@@ -345,17 +345,12 @@ test("failed extraction cleans staging without publishing a partial package", as
 	assert.equal(listeners.length, 0);
 });
 
-test("a new session joins the listed groups it is not in, through a running sibling first, else a stopped one it runs meanwhile until it has caught up", async () => {
+test("a new session joins the listed groups it is not in, through a running sibling first, else a stopped one it runs meanwhile", async () => {
 	await release("0.23.9");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1", "G2", "G3"] }));
 	const joined = Promise.withResolvers();
-	let behind = true;
 	answer = args => {
-		if (args[1] === "stopped" && args[2] === "invite" && behind) {
-			behind = false;
-			return Object.assign(new Error("failed"), { stderr: "letmeknow: behind: the group moved on" });
-		}
 		if (args[0] === "sessions") return { sessions: [
 			{ fp: "stopped", groups: ["G1", "G2"] },
 			{ fp: "running", running: true, groups: ["G1"] },
@@ -372,7 +367,7 @@ test("a new session joins the listed groups it is not in, through a running sibl
 	assert.deepEqual(commands, [
 		"sessions",
 		"--session running invite --group G1", `--session ${me} join link-running-G1`,
-		"--session stopped invite --group G2", "--session stopped invite --group G2", `--session ${me} join link-stopped-G2`,
+		"--session stopped invite --group G2", `--session ${me} join link-stopped-G2`,
 	]);
 	assert.deepEqual(listeners.map(item => item.args.join(" ")), ["listen", "--session stopped listen"]);
 	await new Promise(resolve => setTimeout(resolve, 10));

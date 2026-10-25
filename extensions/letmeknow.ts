@@ -86,17 +86,7 @@ async function letmeknow(executable: string, args: string[]): Promise<Record<str
 // An invite into `group` from `sibling`, another session of this machine in it: a running one, or a stopped one that runs
 // only until `use` is done with the link, or `signal` aborts as the Pi session ends.
 async function inviteFrom(executable: string, sibling: { fp: string; running?: boolean }, group: string, use: (link: string) => Promise<unknown>, signal: AbortSignal): Promise<void> {
-	const args = ["--session", sibling.fp, "invite", "--group", group];
-	// One back from a while away answers `behind` until it has caught up with the group, for up to about two minutes.
-	const invite = async (): Promise<string> => {
-		for (let tries = 1; ; tries++) {
-			try {
-				return (await letmeknow(executable, args)).link;
-			} catch (error) {
-				if (tries === 20 || !(error as { stderr?: string }).stderr?.includes("behind")) throw error;
-			}
-		}
-	};
+	const invite = async (): Promise<string> => (await letmeknow(executable, ["--session", sibling.fp, "invite", "--group", group])).link;
 	if (sibling.running) return void (await use(await invite()));
 	const listen = spawn(executable, ["--session", sibling.fp, "listen"], { stdio: ["ignore", "pipe", "pipe"], signal });
 	try {
