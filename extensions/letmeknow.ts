@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import { type TextContent, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-const MINOR = "0.23";
+const MINOR = "0.24";
 const TARGET = `${process.platform}-${process.arch}`;
 const CACHE = join(homedir(), ".cache", "pi-letmeknow", TARGET);
 const EXECUTABLE = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
@@ -26,6 +26,9 @@ const run = promisify(execFile);
 // The groups each session joins as it starts, by id, and the session to attach to rather than start a new one, by
 // fingerprint: `{ "join": ["<group id>"], "attach": "<fp>" }`.
 const SETTINGS = join(homedir(), ".pi", "agent", "letmeknow.json");
+// How long a sibling has to start and make its invite: back from a while away, its invite first catches up, up to about
+// two minutes.
+const INVITE_WAIT = 180_000;
 // How long the lines the session prints wait for more before they wake the agent together.
 const DEBOUNCE = 2000;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
@@ -80,14 +83,15 @@ async function install(warn: (message: string) => void): Promise<string> {
 	return executable;
 }
 
-async function letmeknow(executable: string, args: string[]): Promise<Record<string, any>> {
-	return JSON.parse((await run(executable, args)).stdout);
+async function letmeknow(executable: string, args: string[], timeout = 0): Promise<Record<string, any>> {
+	return JSON.parse((await run(executable, args, { timeout })).stdout);
 }
 
 // An invite into `group` from `sibling`, another session of this machine in it: a running one, or a stopped one that runs
-// only until `use` is done with the link, or `signal` aborts as the Pi session ends.
+// only until `use` is done with the link, or `signal` aborts as the Pi session ends. A sibling that has no invite within
+// `INVITE_WAIT` fails, so that the next one is asked.
 async function inviteFrom(executable: string, sibling: { fp: string; running?: boolean }, group: string, use: (link: string) => Promise<unknown>, signal: AbortSignal): Promise<void> {
-	const invite = async (): Promise<string> => (await letmeknow(executable, ["--session", sibling.fp, "invite", "--group", group])).link;
+	const invite = async (): Promise<string> => (await letmeknow(executable, ["--session", sibling.fp, "invite", "--group", group], INVITE_WAIT)).link;
 	if (sibling.running) return void (await use(await invite()));
 	const listen = spawn(executable, ["--session", sibling.fp, "listen"], { stdio: ["ignore", "pipe", "pipe"], signal });
 	try {
@@ -96,6 +100,7 @@ async function inviteFrom(executable: string, sibling: { fp: string; running?: b
 			listen.stderr!.on("data", chunk => (errors += chunk));
 			listen.on("error", reject);
 			listen.on("exit", code => reject(new Error(`session ${sibling.fp} stopped (exit ${code}): ${errors.trim()}`)));
+			setTimeout(() => reject(new Error(`session ${sibling.fp} was not ready within ${INVITE_WAIT / 1000} s`)), INVITE_WAIT).unref();
 			createInterface({ input: listen.stdout! }).on("line", line => JSON.parse(line).type === "ready" && resolve());
 		});
 		await use(await invite());
