@@ -201,6 +201,9 @@ export default function (pi: ExtensionAPI): void {
 			await ctx.waitForIdle();
 			// A session that stops in no group is deleted, so one in none runs again as a new session.
 			const { groups } = await letmeknow(current.bin!, ["--session", fp, "groups"]);
+			// The join the old run started goes no further, and stops a sibling it runs; the new run joins again.
+			current.stop.abort();
+			current.stop = new AbortController();
 			// Tools wait for the session to run again.
 			current.ready = new Promise<string>((resolve, reject) => (current.settle = { resolve, reject }));
 			current.ready.then(next => ctx.ui.notify(`letmeknow: ${next} runs ${to}, updated from ${from}`, "info"), () => {});
@@ -257,10 +260,11 @@ export default function (pi: ExtensionAPI): void {
 						process.env.LETMEKNOW_SESSION = event.fp;
 						current.settle.resolve(event.fp);
 						ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
-						// One that ended meanwhile stopped the join, and its ctx is stale.
-						joinListed(program, event.fp, groups, current.stop.signal).then(
-							warnings => session === current && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
-							error => session === current && ctx.ui.notify(`letmeknow: joining the groups of ${SETTINGS}: ${error.message}`, "warning")
+						// One that ended meanwhile, or whose run an update stopped, stopped the join; its ctx may be stale.
+						const { signal } = current.stop;
+						joinListed(program, event.fp, groups, signal).then(
+							warnings => !signal.aborted && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
+							error => !signal.aborted && ctx.ui.notify(`letmeknow: joining the groups of ${SETTINGS}: ${error.message}`, "warning")
 						);
 					});
 				};

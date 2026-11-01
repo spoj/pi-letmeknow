@@ -479,3 +479,37 @@ test("a Pi session that ends during a join stops the sibling it runs meanwhile, 
 	assert.equal(listeners.length, 2);
 	assert.deepEqual(notices, []);
 });
+
+test("/letmeknow-update during a join stops it and the sibling it runs, and the new run joins again", async () => {
+	await release("0.24.9");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1"] }));
+	const inviting = Promise.withResolvers();
+	const invite = Promise.withResolvers();
+	const joined = Promise.withResolvers();
+	let invites = 0;
+	answer = args => {
+		if (args[0] === "sessions") return { sessions: [{ fp: "stopped", groups: ["G1"] }] };
+		if (args[2] === "invite" && ++invites === 1) {
+			inviting.resolve();
+			return invite.promise;
+		}
+		if (args[2] === "invite") return { link: "link-2" };
+		if (args[2] === "join") joined.resolve();
+		return {};
+	};
+	const session = start();
+	await session.ready;
+	await inviting.promise;
+	await release("0.24.10");
+	await session.update();
+	await joined.promise;
+	assert.deepEqual(listeners.map(item => [item.args.join(" "), item.child.killed]), [
+		["listen", true], ["--session stopped listen", true], ["listen", undefined], ["--session stopped listen", undefined],
+	]);
+	invite.reject(Object.assign(new Error("failed"), { stderr: "letmeknow: session stopped is not running" }));
+	await new Promise(resolve => setTimeout(resolve, 10));
+	assert.deepEqual(calls.map(call => call.args.join(" ")).filter(args => args.includes("join")), ["--session 3123456789abcdef join link-2"]);
+	assert.deepEqual(notices.filter(n => n.level !== "info"), []);
+	await session.shutdown();
+});
