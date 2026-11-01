@@ -158,39 +158,39 @@ function start(name = "named") {
 }
 
 test("publishes the entire package at an immutable platform/full-version path and reuses it", async () => {
-	await release("0.24.2");
-	const binary = await release("0.24.10");
-	await release("0.25.99");
-	await release("0.24.11-beta.1");
+	await release("0.25.2");
+	const binary = await release("0.25.10");
+	await release("0.26.99");
+	await release("0.25.11-beta.1");
 	const first = start();
 	assert.equal(await first.ready, undefined);
 	assert.equal(listeners[0].file, binary);
-	assert.equal(await readFile(join(dirname(binary), "..", "package.json"), "utf8"), '{"version":"0.24.10"}');
-	assert.equal(await readFile(join(dirname(binary), "kind"), "utf8"), "kind 0.24.10");
+	assert.equal(await readFile(join(dirname(binary), "..", "package.json"), "utf8"), '{"version":"0.25.10"}');
+	assert.equal(await readFile(join(dirname(binary), "kind"), "utf8"), "kind 0.25.10");
 	assert.equal(existsSync(join(cache, executable)), false);
 	const second = start();
 	assert.equal(await second.ready, undefined);
 	assert.equal(listeners[1].file, binary);
 	assert.equal(requests.filter(url => url.endsWith(".tgz")).length, 1);
-	assert.deepEqual(await readdir(join(cache, target)), ["0.24.10"]);
+	assert.deepEqual(await readdir(join(cache, target)), ["0.25.10"]);
 });
 
 test("new patch startup leaves old listener, skill, plugin and tool bound to their package", async () => {
-	const oldBinary = await release("0.24.1", { kind: "old kind", retired: "retired plugin" });
+	const oldBinary = await release("0.25.1", { kind: "old kind", retired: "retired plugin" });
 	const old = start("");
 	assert.equal(await old.ready, undefined);
-	const newBinary = await release("0.24.2");
+	const newBinary = await release("0.25.2");
 	const newer = start();
 	assert.equal(await newer.ready, undefined);
 	assert.deepEqual(listeners.map(item => item.file), [oldBinary, newBinary]);
 	assert.deepEqual(listeners.map(item => item.args), [["listen"], ["listen"]], "each Pi session is a new letmeknow session");
 	assert.equal(process.env.LETMEKNOW_SESSION, "2123456789abcdef");
 	for (const args of [["skill"], ["kind", "read"], ["send", "--to", "someone", "-"]]) {
-		assert.equal((await old.command(args, "input")).content[0].text, "0.24.1: old kind: skill 0.24.1");
+		assert.equal((await old.command(args, "input")).content[0].text, "0.25.1: old kind: skill 0.25.1");
 		assert.equal(calls.at(-1).file, oldBinary);
 		assert.deepEqual(calls.at(-1).args, ["--session", "1123456789abcdef", ...args]);
 	}
-	assert.equal((await newer.command(["skill"])).content[0].text, "0.24.2: kind 0.24.2: skill 0.24.2");
+	assert.equal((await newer.command(["skill"])).content[0].text, "0.25.2: kind 0.25.2: skill 0.25.2");
 	assert.equal(await readFile(join(dirname(oldBinary), "retired"), "utf8"), "retired plugin");
 	assert.equal(existsSync(join(dirname(newBinary), "retired")), false);
 	const commands = calls.length;
@@ -202,7 +202,7 @@ test("new patch startup leaves old listener, skill, plugin and tool bound to the
 });
 
 test("concurrent same-version installers publish only complete packages", async () => {
-	const binary = await release("0.24.3");
+	const binary = await release("0.25.3");
 	const extracted = Promise.withResolvers();
 	let arrivals = 0;
 	afterExtract = async () => {
@@ -215,31 +215,31 @@ test("concurrent same-version installers publish only complete packages", async 
 	assert.deepEqual(await Promise.all([first.ready, second.ready]), [undefined, undefined]);
 	assert.equal(arrivals, 2);
 	assert.deepEqual(listeners.map(item => item.file), [binary, binary]);
-	assert.equal(await readFile(join(dirname(binary), "kind"), "utf8"), "kind 0.24.3");
-	assert.equal(await readFile(join(dirname(binary), "..", "skills", "SKILL.md"), "utf8"), "skill 0.24.3");
-	assert.deepEqual(await readdir(join(cache, target)), ["0.24.3"]);
+	assert.equal(await readFile(join(dirname(binary), "kind"), "utf8"), "kind 0.25.3");
+	assert.equal(await readFile(join(dirname(binary), "..", "skills", "SKILL.md"), "utf8"), "skill 0.25.3");
+	assert.deepEqual(await readdir(join(cache, target)), ["0.25.3"]);
 });
 
 test("an older install finishing after a newer install cannot replace its package", async () => {
-	const oldBinary = await release("0.24.4");
+	const oldBinary = await release("0.25.4");
 	const extracted = Promise.withResolvers();
 	const resume = Promise.withResolvers();
 	afterExtract = async () => { extracted.resolve(); await resume.promise; };
 	const old = start();
 	await extracted.promise;
 	afterExtract = () => {};
-	const newBinary = await release("0.24.5");
+	const newBinary = await release("0.25.5");
 	const newer = start();
 	assert.equal(await newer.ready, undefined);
 	resume.resolve();
 	assert.equal(await old.ready, undefined);
 	assert.deepEqual(listeners.map(item => item.file), [newBinary, oldBinary]);
-	assert.equal((await old.command(["skill"])).content[0].text, "0.24.4: kind 0.24.4: skill 0.24.4");
-	assert.equal((await newer.command(["skill"])).content[0].text, "0.24.5: kind 0.24.5: skill 0.24.5");
+	assert.equal((await old.command(["skill"])).content[0].text, "0.25.4: kind 0.25.4: skill 0.25.4");
+	assert.equal((await newer.command(["skill"])).content[0].text, "0.25.5: kind 0.25.5: skill 0.25.5");
 });
 
 test("the status line and system prompt give the session's fingerprint once it is ready", async () => {
-	await release("0.24.8");
+	await release("0.25.8");
 	const session = start();
 	assert.doesNotMatch(session.systemPrompt(), /fingerprint/);
 	assert.equal(await session.ready, undefined);
@@ -248,37 +248,37 @@ test("the status line and system prompt give the session's fingerprint once it i
 });
 
 test("/letmeknow-update runs the session again with the newest patch, as the same session, or a new one if it is in no group", async () => {
-	const oldBinary = await release("0.24.18");
+	const oldBinary = await release("0.25.18");
 	const session = start();
 	assert.equal(await session.ready, undefined);
 	await session.update();
-	assert.deepEqual(notices, [{ message: "letmeknow: 1123456789abcdef runs 0.24.18, the newest 0.24 release", level: "info" }]);
+	assert.deepEqual(notices, [{ message: "letmeknow: 1123456789abcdef runs 0.25.18, the newest 0.25 release", level: "info" }]);
 	assert.equal(listeners.length, 1);
-	const newBinary = await release("0.24.19");
+	const newBinary = await release("0.25.19");
 	answer = () => ({ groups: [{ group: "G1" }] });
 	await session.update();
 	answer = undefined;
 	assert.equal(listeners[0].child.killed, true);
 	assert.deepEqual(listeners.map(item => [item.file, item.args]), [[oldBinary, ["listen"]], [newBinary, ["--session", "1123456789abcdef", "listen"]]]);
-	assert.equal((await session.command(["skill"])).content[0].text, "0.24.19: kind 0.24.19: skill 0.24.19");
+	assert.equal((await session.command(["skill"])).content[0].text, "0.25.19: kind 0.25.19: skill 0.25.19");
 	assert.deepEqual(calls.map(call => call.args), [["--session", "1123456789abcdef", "groups"], ["--session", "1123456789abcdef", "skill"]]);
 	assert.equal(calls[0].file, oldBinary);
 	assert.equal(session.status(), "lmk:1123456789abcdef");
-	assert.deepEqual(notices.slice(1), [{ message: "letmeknow: 1123456789abcdef runs 0.24.19, updated from 0.24.18", level: "info" }]);
-	const newest = await release("0.24.20");
+	assert.deepEqual(notices.slice(1), [{ message: "letmeknow: 1123456789abcdef runs 0.25.19, updated from 0.25.18", level: "info" }]);
+	const newest = await release("0.25.20");
 	answer = () => ({});
 	await session.update();
 	assert.deepEqual([listeners[1].child.killed, listeners[2].file, listeners[2].args], [true, newest, ["listen"]]);
 	await session.command(["groups"]);
 	assert.deepEqual(calls.at(-1), { file: newest, args: ["--session", "3123456789abcdef", "groups"], input: "" });
 	assert.equal(session.status(), "lmk:3123456789abcdef");
-	assert.deepEqual(notices.slice(2), [{ message: "letmeknow: 3123456789abcdef runs 0.24.20, updated from 0.24.19", level: "info" }]);
+	assert.deepEqual(notices.slice(2), [{ message: "letmeknow: 3123456789abcdef runs 0.25.20, updated from 0.25.19", level: "info" }]);
 	await session.shutdown();
 	assert.equal(listeners[2].child.killed, true);
 });
 
 test("tools await selection, and shutdown during installation never launches a listener or command", async () => {
-	const binary = await release("0.24.6");
+	const binary = await release("0.25.6");
 	const extracted = Promise.withResolvers();
 	const resume = Promise.withResolvers();
 	afterExtract = async () => { extracted.resolve(); await resume.promise; };
@@ -297,33 +297,33 @@ test("tools await selection, and shutdown during installation never launches a l
 });
 
 test("a tool issued during startup waits for the selected binary", async () => {
-	const binary = await release("0.24.7");
+	const binary = await release("0.25.7");
 	const session = start();
-	assert.equal((await session.command(["skill"])).content[0].text, "0.24.7: kind 0.24.7: skill 0.24.7");
+	assert.equal((await session.command(["skill"])).content[0].text, "0.25.7: kind 0.25.7: skill 0.25.7");
 	assert.equal(await session.ready, undefined);
 	assert.equal(calls[0].file, binary);
 });
 
 test("offline startup selects the highest cached patch only in this minor and platform", async () => {
-	await release("0.24.2");
+	await release("0.25.2");
 	assert.equal(await start().ready, undefined);
-	const binary = await release("0.24.10");
+	const binary = await release("0.25.10");
 	assert.equal(await start().ready, undefined);
-	for (const directory of [join(cache, target, "0.25.99"), join(cache, "other-platform", "0.24.99"), join(cache, target, "new-partial"), join(cache, target, "0.24.11-beta.1")]) {
+	for (const directory of [join(cache, target, "0.26.99"), join(cache, "other-platform", "0.25.99"), join(cache, target, "new-partial"), join(cache, target, "0.25.11-beta.1")]) {
 		await mkdir(join(directory, "bin"), { recursive: true });
 		await writeFile(join(directory, "bin", executable), "wrong binary");
 	}
-	await mkdir(join(cache, target, "0.24.100"));
+	await mkdir(join(cache, target, "0.25.100"));
 	offline = true;
 	const session = start();
 	assert.equal(await session.ready, undefined);
 	assert.equal(listeners.at(-1).file, binary);
-	assert.match(notices.at(-1).message, /running cached 0\.24\.10/);
+	assert.match(notices.at(-1).message, /running cached 0\.25\.10/);
 	assert.equal(notices.at(-1).level, "warning");
 });
 
 test("offline startup never reuses the legacy binary or another minor/platform", async () => {
-	for (const directory of [join(cache, target, "0.23.99", "bin"), join(cache, target, "0.25.1", "bin"), join(cache, "other-platform", "0.24.99", "bin"), cache]) {
+	for (const directory of [join(cache, target, "0.24.99", "bin"), join(cache, target, "0.26.1", "bin"), join(cache, "other-platform", "0.25.99", "bin"), cache]) {
 		await mkdir(directory, { recursive: true });
 		await writeFile(join(directory, executable), "legacy or unsupported");
 	}
@@ -336,46 +336,46 @@ test("offline startup never reuses the legacy binary or another minor/platform",
 });
 
 test("integrity failure does not publish or fall back to a cached patch", async () => {
-	await release("0.24.1");
+	await release("0.25.1");
 	assert.equal(await start().ready, undefined);
-	const binary = await release("0.24.2");
-	versions["0.24.2"].dist.integrity = "sha512-wrong";
+	const binary = await release("0.25.2");
+	versions["0.25.2"].dist.integrity = "sha512-wrong";
 	const session = start();
 	assert.match((await session.ready).message, /does not match its integrity/);
 	await assert.rejects(session.command(["skill"]), /does not match its integrity/);
 	assert.equal(existsSync(binary), false);
 	assert.equal(listeners.length, 1);
-	assert.deepEqual(await readdir(join(cache, target)), ["0.24.1"]);
+	assert.deepEqual(await readdir(join(cache, target)), ["0.25.1"]);
 });
 
 test("download failure does not fall back to an older cached patch", async () => {
-	await release("0.24.1");
+	await release("0.25.1");
 	assert.equal(await start().ready, undefined);
-	const binary = await release("0.24.2");
+	const binary = await release("0.25.2");
 	mock.method(globalThis, "fetch", async url => url.endsWith(".tgz")
 		? new Response("unavailable", { status: 503 }) : Response.json({ versions }));
 	const session = start();
-	assert.match((await session.ready).message, /cannot fetch letmeknow 0\.24\.2 \(503\)/);
+	assert.match((await session.ready).message, /cannot fetch letmeknow 0\.25\.2 \(503\)/);
 	assert.equal(existsSync(binary), false);
 	assert.equal(listeners.length, 1);
-	assert.deepEqual(await readdir(join(cache, target)), ["0.24.1"]);
+	assert.deepEqual(await readdir(join(cache, target)), ["0.25.1"]);
 });
 
 test("publication failure is not mistaken for a concurrent completed install", async () => {
-	const binary = await release("0.24.9");
+	const binary = await release("0.25.9");
 	await mkdir(join(cache, target), { recursive: true });
-	await writeFile(join(cache, target, "0.24.9"), "not a package directory");
+	await writeFile(join(cache, target, "0.25.9"), "not a package directory");
 	const session = start();
 	assert.ok(await session.ready instanceof Error);
 	assert.equal(existsSync(binary), false);
 	assert.equal(listeners.length, 0);
-	assert.deepEqual(await readdir(join(cache, target)), ["0.24.9"]);
-	assert.equal(await readFile(join(cache, target, "0.24.9"), "utf8"), "not a package directory");
+	assert.deepEqual(await readdir(join(cache, target)), ["0.25.9"]);
+	assert.equal(await readFile(join(cache, target, "0.25.9"), "utf8"), "not a package directory");
 });
 
 test("failed extraction cleans staging without publishing a partial package", async () => {
-	const binary = await release("0.24.8");
-	const { dist } = versions["0.24.8"];
+	const binary = await release("0.25.8");
+	const { dist } = versions["0.25.8"];
 	const bytes = Buffer.from("not a tarball");
 	archives.set(dist.tarball, bytes);
 	dist.integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
@@ -387,7 +387,7 @@ test("failed extraction cleans staging without publishing a partial package", as
 });
 
 test("a new session joins the listed groups it is not in, through a running sibling first, else a stopped one it runs meanwhile", async () => {
-	await release("0.24.9");
+	await release("0.25.9");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1", "G2", "G3"] }));
 	const joined = Promise.withResolvers();
@@ -418,7 +418,7 @@ test("a new session joins the listed groups it is not in, through a running sibl
 });
 
 test("a Pi session attaches to the session letmeknow.json names, as its reader, and runs its commands with that session's program", async () => {
-	await release("0.24.13");
+	await release("0.25.13");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ attach: "fedcba9876543210" }));
 	answer = () => ({});
@@ -442,7 +442,7 @@ test("a Pi session attaches to the session letmeknow.json names, as its reader, 
 });
 
 test("a Pi session whose session to attach to has a reader already is a new letmeknow session", async () => {
-	await release("0.24.13");
+	await release("0.25.13");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ attach: "fedcba9876543210" }));
 	refuse = args => args.at(-1) === "attach" && "letmeknow: session fedcba9876543210 has a reader attached already\n";
@@ -458,7 +458,7 @@ test("a Pi session whose session to attach to has a reader already is a new letm
 });
 
 test("a Pi session that ends during a join stops the sibling it runs meanwhile, and joins no further", async () => {
-	await release("0.24.9");
+	await release("0.25.9");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1", "G2"] }));
 	const inviting = Promise.withResolvers();
@@ -481,7 +481,7 @@ test("a Pi session that ends during a join stops the sibling it runs meanwhile, 
 });
 
 test("/letmeknow-update during a join stops it and the sibling it runs, and the new run joins again", async () => {
-	await release("0.24.9");
+	await release("0.25.9");
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["G1"] }));
 	const inviting = Promise.withResolvers();
@@ -501,7 +501,7 @@ test("/letmeknow-update during a join stops it and the sibling it runs, and the 
 	const session = start();
 	await session.ready;
 	await inviting.promise;
-	await release("0.24.10");
+	await release("0.25.10");
 	await session.update();
 	await joined.promise;
 	assert.deepEqual(listeners.map(item => [item.args.join(" "), item.child.killed]), [
