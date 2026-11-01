@@ -46,8 +46,13 @@ mock.module("node:child_process", {
 		}),
 		spawn: (file, args, options) => {
 			const child = Object.assign(new EventEmitter(), {
-				stdout: new PassThrough(), stderr: new PassThrough(),
-				kill: () => { child.killed = true; },
+				stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null,
+				kill: () => {
+					if (child.killed) return;
+					child.killed = true;
+					child.signalCode = "SIGTERM";
+					setImmediate(() => child.emit("exit", null, "SIGTERM"));
+				},
 			});
 			// As Node does, an abort kills the child and emits an AbortError.
 			options?.signal?.addEventListener("abort", () => {
@@ -120,8 +125,9 @@ function start(name = "named") {
 	const handlers = {};
 	const ready = Promise.withResolvers();
 	let tool, status;
+	const commands = {};
 	const ctx = {
-		cwd: home, mode: "tui",
+		cwd: home, mode: "tui", waitForIdle: async () => {},
 		sessionManager: { getSessionName: () => name },
 		ui: {
 			notify: (message, level) => {
@@ -131,7 +137,11 @@ function start(name = "named") {
 			setStatus: (_key, value) => { status = value; if (value) ready.resolve(); },
 		},
 	};
-	extension({ on: (event, handler) => { handlers[event] = handler; }, registerTool: value => { tool = value; } });
+	extension({
+		on: (event, handler) => { handlers[event] = handler; },
+		registerTool: value => { tool = value; },
+		registerCommand: (name, command) => { commands[name] = command; },
+	});
 	handlers.session_start({}, ctx);
 	return {
 		ready: ready.promise,
@@ -142,6 +152,7 @@ function start(name = "named") {
 			return event.systemPromptOptions.sections.letmeknow;
 		},
 		command: (args, input) => tool.execute("id", { args, input }, undefined, undefined, ctx),
+		update: () => commands["letmeknow-update"].handler("", ctx),
 		shutdown: () => handlers.session_shutdown({}, ctx),
 	};
 }
@@ -234,6 +245,36 @@ test("the status line and system prompt give the session's fingerprint once it i
 	assert.equal(await session.ready, undefined);
 	assert.equal(session.status(), "lmk:1123456789abcdef");
 	assert.match(session.systemPrompt(), /^You are in letmeknow as its session 1123456789abcdef, as other members know it, in a session that runs already:/);
+});
+
+test("/letmeknow-update runs the session again with the newest patch, as the same session, or a new one if it is in no group", async () => {
+	const oldBinary = await release("0.23.18");
+	const session = start();
+	assert.equal(await session.ready, undefined);
+	await session.update();
+	assert.deepEqual(notices, [{ message: "letmeknow: 1123456789abcdef runs 0.23.18, the newest 0.23 release", level: "info" }]);
+	assert.equal(listeners.length, 1);
+	const newBinary = await release("0.23.19");
+	answer = () => ({ groups: [{ group: "G1" }] });
+	await session.update();
+	answer = undefined;
+	assert.equal(listeners[0].child.killed, true);
+	assert.deepEqual(listeners.map(item => [item.file, item.args]), [[oldBinary, ["listen"]], [newBinary, ["--session", "1123456789abcdef", "listen"]]]);
+	assert.equal((await session.command(["skill"])).content[0].text, "0.23.19: kind 0.23.19: skill 0.23.19");
+	assert.deepEqual(calls.map(call => call.args), [["--session", "1123456789abcdef", "groups"], ["--session", "1123456789abcdef", "skill"]]);
+	assert.equal(calls[0].file, oldBinary);
+	assert.equal(session.status(), "lmk:1123456789abcdef");
+	assert.deepEqual(notices.slice(1), [{ message: "letmeknow: 1123456789abcdef runs 0.23.19, updated from 0.23.18", level: "info" }]);
+	const newest = await release("0.23.20");
+	answer = () => ({});
+	await session.update();
+	assert.deepEqual([listeners[1].child.killed, listeners[2].file, listeners[2].args], [true, newest, ["listen"]]);
+	await session.command(["groups"]);
+	assert.deepEqual(calls.at(-1), { file: newest, args: ["--session", "3123456789abcdef", "groups"], input: "" });
+	assert.equal(session.status(), "lmk:3123456789abcdef");
+	assert.deepEqual(notices.slice(2), [{ message: "letmeknow: 3123456789abcdef runs 0.23.20, updated from 0.23.19", level: "info" }]);
+	await session.shutdown();
+	assert.equal(listeners[2].child.killed, true);
 });
 
 test("tools await selection, and shutdown during installation never launches a listener or command", async () => {
@@ -393,6 +434,9 @@ test("a Pi session attaches to the session letmeknow.json names, as its reader, 
 	await new Promise(resolve => setTimeout(resolve, 10));
 	await session.command(["groups"]);
 	assert.equal(calls.at(-1).file, "/detached/newer");
+	await session.update();
+	assert.equal(listeners.length, 1, "one that runs on its own is updated by running it again");
+	assert.match(notices.at(-1).message, /fedcba9876543210 runs on its own/);
 	await session.shutdown();
 	assert.equal(listeners[0].child.killed, true, "ending the Pi session only stops its reading");
 });

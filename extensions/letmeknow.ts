@@ -2,20 +2,21 @@
 // known by its fingerprint, which joins the groups of ~/.pi/agent/letmeknow.json and goes when the Pi session ends in no group;
 // or as the session that file names to attach to, which runs on its own, while no other Pi session is attached to it. It runs
 // letmeknow's own binary, the newest release of the minor version it speaks, which it fetches from npm into
-// ~/.cache/pi-letmeknow. The letmeknow session logs every event and prints what concerns the agent: those lines reach the
-// agent as one message that starts a turn, once none came for a moment; its `ready` only gives the session's fingerprint,
-// program and log, which the system prompt shows, and the status line the fingerprint, as other members know the session
-// by it. The agent's `letmeknow` tool runs the session's program for its commands.
+// ~/.cache/pi-letmeknow, and /letmeknow-update runs the session again with a newer one, as the same session. The letmeknow
+// session logs every event and prints what concerns the agent: those lines reach the agent as one message that starts a
+// turn, once none came for a moment; its `ready` only gives the session's fingerprint, program and log, which the system
+// prompt shows, and the status line the fingerprint, as other members know the session by it. The agent's `letmeknow` tool
+// runs the session's program for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { type TextContent, Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 const MINOR = "0.23";
 const TARGET = `${process.platform}-${process.arch}`;
@@ -127,7 +128,7 @@ async function joinListed(executable: string, fp: string, groups: string[], sign
 }
 
 export default function (pi: ExtensionAPI): void {
-	let session: { executable: Promise<string>; ready: Promise<string>; settle: { resolve: (fp: string) => void; reject: (error: Error) => void }; stop: AbortController; listen?: ChildProcess; fp?: string; bin?: string; log?: string; attached?: boolean } | undefined;
+	let session: { executable: Promise<string>; ready: Promise<string>; settle: { resolve: (fp: string) => void; reject: (error: Error) => void }; stop: AbortController; restart?: (program: string, args: string[]) => void; listen?: ChildProcess; fp?: string; bin?: string; log?: string; attached?: boolean } | undefined;
 	let pending: TextContent[] | undefined;
 	let waiting: string[] = [];
 	let timer: NodeJS.Timeout | undefined;
@@ -182,10 +183,38 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	const update = {
+		description: `Runs this Pi session's letmeknow session again with the newest ${MINOR} release, as the same session, once the agent is idle`,
+		async handler(_args: string, ctx: ExtensionCommandContext): Promise<void> {
+			const current = session;
+			if (!current) return ctx.ui.notify("letmeknow: this Pi session is not in letmeknow", "error");
+			const fp = await current.ready;
+			if (current.attached) return ctx.ui.notify(`letmeknow: ${fp} runs on its own; run it again with the newer program to update it`, "warning");
+			const program = await install(message => ctx.ui.notify(message, "warning"));
+			const [from, to] = [current.bin!, program].map(path => basename(dirname(dirname(path))));
+			if (from === to) return ctx.ui.notify(`letmeknow: ${fp} runs ${to}, the newest ${MINOR} release`, "info");
+			await ctx.waitForIdle();
+			// A session that stops in no group is deleted, so one in none runs again as a new session.
+			const { groups } = await letmeknow(current.bin!, ["--session", fp, "groups"]);
+			// Tools wait for the session to run again.
+			current.ready = new Promise<string>((resolve, reject) => (current.settle = { resolve, reject }));
+			current.ready.then(next => ctx.ui.notify(`letmeknow: ${next} runs ${to}, updated from ${from}`, "info"), () => {});
+			const old = current.listen!;
+			current.listen = undefined;
+			if (old.exitCode === null && old.signalCode === null) {
+				const exited = new Promise(resolve => old.once("exit", resolve));
+				old.kill();
+				await exited;
+			}
+			if (session === current) current.restart!(program, groups ? ["--session", fp, "listen"] : ["listen"]);
+		},
+	};
+
 	pi.on("session_start", (_event, ctx) => {
 		if ((!ctx.sessionManager.getSessionName() && ctx.mode !== "tui") || claim.piLetmeknow) return;
 		claim.piLetmeknow = true;
 		pi.registerTool(tool);
+		pi.registerCommand("letmeknow-update", update);
 		let settle!: NonNullable<typeof session>["settle"];
 		const ready = new Promise<string>((resolve, reject) => (settle = { resolve, reject }));
 		// Tools wait for it; one never ready fails them.
@@ -202,14 +231,15 @@ export default function (pi: ExtensionAPI): void {
 					current.settle.reject(new Error(`letmeknow stopped (exit ${code}): ${errors}`));
 					if (session === current) ctx.ui.notify(`letmeknow stopped (exit ${code}): ${errors}`, "error");
 				};
-				// Runs `listen` or `attach`, `args`: what it prints reaches the agent, and its `ready` names the session.
-				const start = (args: string[], exited: typeof stopped) => {
-					const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"], env });
+				// Runs `listen` or `attach`, `args`, with `program`: what it prints reaches the agent, and its `ready` names the session.
+				const start = (program: string, args: string[], exited: typeof stopped) => {
+					const child = spawn(program, args, { stdio: ["ignore", "pipe", "pipe"], env });
 					current.listen = child;
 					let errors = "";
 					child.stderr!.on("data", chunk => (errors = (errors + chunk).slice(-2000)));
 					child.on("error", error => ctx.ui.notify(`letmeknow: ${error.message}`, "error"));
-					child.on("exit", code => exited(code, errors.trim()));
+					// One the update stopped stops nothing.
+					child.on("exit", code => current.listen === child && exited(code, errors.trim()));
 					createInterface({ input: child.stdout! }).on("line", line => {
 						if (session !== current) return;
 						const event = JSON.parse(line);
@@ -223,18 +253,19 @@ export default function (pi: ExtensionAPI): void {
 						current.settle.resolve(event.fp);
 						ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
 						// One that ended meanwhile stopped the join, and its ctx is stale.
-						joinListed(executable, event.fp, groups, current.stop.signal).then(
+						joinListed(program, event.fp, groups, current.stop.signal).then(
 							warnings => session === current && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
 							error => session === current && ctx.ui.notify(`letmeknow: joining the groups of ${SETTINGS}: ${error.message}`, "warning")
 						);
 					});
 				};
-				if (!attach) return start(["listen"], stopped);
+				current.restart = (program, args) => start(program, args, stopped);
+				if (!attach) return start(executable, ["listen"], stopped);
 				// One that has a reader already, or does not run, leaves this Pi session a new letmeknow session.
-				start(["--session", attach, "attach"], (code, errors) => {
+				start(executable, ["--session", attach, "attach"], (code, errors) => {
 					if (current.fp || session !== current) return stopped(code, errors);
 					ctx.ui.notify(`letmeknow: not attached to ${attach} (${errors}); this Pi session is a new letmeknow session`, "info");
-					start(["listen"], stopped);
+					start(executable, ["listen"], stopped);
 				});
 			},
 			error => {
