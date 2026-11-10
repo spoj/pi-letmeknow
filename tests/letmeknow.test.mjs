@@ -119,7 +119,7 @@ async function release(version, plugins = { kind: `kind ${version}` }) {
 	return join(cache, target, version, "bin", executable);
 }
 
-function start(name = "named") {
+function start(name = "named", mode = "tui") {
 	// Independent Pi processes have independent claims; emulate them around each factory's session state.
 	delete globalThis.piLetmeknow;
 	const handlers = {};
@@ -128,7 +128,7 @@ function start(name = "named") {
 	const commands = {};
 	const messages = [];
 	const ctx = {
-		cwd: home, mode: "tui", waitForIdle: async () => {},
+		cwd: home, mode, waitForIdle: async () => {},
 		sessionManager: { getSessionName: () => name },
 		ui: {
 			notify: (message, level) => {
@@ -200,6 +200,43 @@ test("shutdown clears the wake timer and waiting lines before another session st
 	t.mock.timers.tick(2000);
 	assert.equal(session.messages.length, 1);
 	assert.deepEqual(session.messages[0].message.content, [{ type: "text", text: '{"type":"message","text":"new"}' }]);
+	await session.shutdown();
+});
+
+for (const attached of [false, true]) {
+	test(`an unexpectedly stopped ${attached ? "attach" : "listen"} tells the headless agent once, with the command to run it again`, async () => {
+		const binary = await release("0.25.2");
+		if (attached) {
+			await mkdir(join(home, ".pi", "agent"), { recursive: true });
+			await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ attach: "fedcba9876543210" }));
+		}
+		const session = start("named", "headless");
+		await session.ready;
+		const { child } = listeners[0];
+		child.stderr.write("first error\nlast error\n");
+		child.emit("exit", 7);
+		const fp = attached ? "fedcba9876543210" : "1123456789abcdef";
+		const bin = attached ? "/detached/letmeknow" : binary;
+		assert.deepEqual(session.messages, [{
+			message: { customType: "letmeknow", display: true, content: [{ type: "text", text: `letmeknow stopped (exit 7): first error\nlast error\nNothing reaches you until your letmeknow session runs again. Run it again with: ${bin} --session ${fp} listen` }] },
+			options: { deliverAs: "steer", triggerTurn: true },
+		}]);
+		assert.deepEqual(notices, [{ message: "letmeknow stopped (exit 7): first error\nlast error", level: "error" }]);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(listeners.length, 1, "the listener is not restarted automatically");
+		await session.shutdown();
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(session.messages.length, 1);
+	});
+}
+
+test("a listener stopped before ready tells the agent without inventing a restart command", async () => {
+	await release("0.25.2");
+	refuse = () => "cannot start\n";
+	const session = start("named", "headless");
+	assert.match((await session.ready).message, /letmeknow stopped \(exit 1\): cannot start/);
+	assert.equal(session.messages.length, 1);
+	assert.deepEqual(session.messages[0].message.content, [{ type: "text", text: "letmeknow stopped (exit 1): cannot start\nNothing reaches you until your letmeknow session runs again." }]);
 	await session.shutdown();
 });
 
@@ -321,6 +358,8 @@ test("/letmeknow-update runs the session again with the newest patch, as the sam
 	assert.deepEqual(notices.slice(2), [{ message: "letmeknow: 3123456789abcdef runs 0.25.20, updated from 0.25.19", level: "info" }]);
 	await session.shutdown();
 	assert.equal(listeners[2].child.killed, true);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(session.messages, [], "update and shutdown stop listeners without telling the agent");
 });
 
 test("tools await selection, and shutdown during installation never launches a listener or command", async () => {

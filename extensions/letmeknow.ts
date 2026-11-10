@@ -237,8 +237,13 @@ export default function (pi: ExtensionAPI): void {
 				// A new session, not the one a parent Pi's LETMEKNOW_SESSION names.
 				const { LETMEKNOW_SESSION: _, ...env } = process.env;
 				const stopped = (code: number | null, errors: string) => {
-					current.settle.reject(new Error(`letmeknow stopped (exit ${code}): ${errors}`));
-					if (session === current) ctx.ui.notify(`letmeknow stopped (exit ${code}): ${errors}`, "error");
+					const message = `letmeknow stopped (exit ${code}): ${errors}`;
+					current.settle.reject(new Error(message));
+					if (session === current) {
+						ctx.ui.notify(message, "error");
+						const restart = current.fp && current.bin ? ` Run it again with: ${current.bin} --session ${current.fp} listen` : "";
+						notify(`${message}\nNothing reaches you until your letmeknow session runs again.${restart}`);
+					}
 				};
 				// Runs `listen` or `attach`, `args`, with `program`: what it prints reaches the agent, and its `ready` names the session.
 				const start = (program: string, args: string[], exited: typeof stopped) => {
