@@ -16,7 +16,7 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { type TextContent, Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, truncateHead } from "@earendil-works/pi-coding-agent";
 
 const MINOR = "0.25";
 const TARGET = `${process.platform}-${process.arch}`;
@@ -31,6 +31,7 @@ const SETTINGS = join(homedir(), ".pi", "agent", "letmeknow.json");
 const INVITE_WAIT = 180_000;
 // How long the first waiting line waits before the lines wake the agent together.
 const DEBOUNCE = 2000;
+const MAX_LINE = 32 * 1024;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
 // process loads, the first to start a session puts it in letmeknow, until that session ends.
 const claim = globalThis as { piLetmeknow?: true };
@@ -139,13 +140,14 @@ export default function (pi: ExtensionAPI): void {
 	let timer: NodeJS.Timeout | undefined;
 
 	function wake(line: string): void {
-		waiting.push(line);
+		waiting.push(line.length > MAX_LINE ? `${line.slice(0, MAX_LINE)} [letmeknow: line truncated; the session's log has the whole line.]` : line);
 		if (timer) return;
 		timer = setTimeout(() => {
 			timer = undefined;
 			const lines = waiting;
 			waiting = [];
-			notify(lines.join("\n"));
+			const output = truncateHead(lines.join("\n"));
+			notify(output.content + (output.truncated ? "\n[letmeknow: output truncated; the rest is in the session's log.]" : ""));
 		}, DEBOUNCE);
 	}
 
@@ -182,7 +184,9 @@ export default function (pi: ExtensionAPI): void {
 			const running = run(current.bin!, ["--session", fp, ...args], { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
 			running.child.stdin!.end(input ?? "");
 			try {
-				return { content: [{ type: "text", text: (await running).stdout }], details: undefined };
+				const output = truncateHead((await running).stdout);
+				const text = output.content + (output.truncated ? `\n[letmeknow: output truncated; showing ${output.outputLines} of ${output.totalLines} lines.]` : "");
+				return { content: [{ type: "text", text }], details: undefined };
 			} catch (error) {
 				throw new Error((error as { stderr?: string }).stderr?.trim() || (error as Error).message);
 			}

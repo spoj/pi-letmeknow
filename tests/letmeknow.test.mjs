@@ -10,18 +10,19 @@ import { PassThrough } from "node:stream";
 import { after, beforeEach, mock, test } from "node:test";
 import { promisify } from "node:util";
 import { Type } from "typebox";
+import { truncateHead } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/truncate.js";
 
 const run = promisify(execFile);
 const home = await mkdtemp(join(tmpdir(), "pi-letmeknow-test-"));
 const target = `${process.platform}-${process.arch}`;
 const cache = join(home, ".cache", "pi-letmeknow");
 const executable = process.platform === "win32" ? "letmeknow.exe" : "letmeknow";
-let versions, requests, calls, listeners, notices, offline, afterExtract, answer, refuse;
+let versions, requests, calls, listeners, notices, offline, afterExtract, answer, refuse, stdout;
 const archives = new Map();
 
 mock.module("node:os", { namedExports: { homedir: () => home } });
 mock.module("@earendil-works/pi-ai", { namedExports: { Type } });
-mock.module("@earendil-works/pi-coding-agent", { namedExports: { defineTool: tool => tool } });
+mock.module("@earendil-works/pi-coding-agent", { namedExports: { defineTool: tool => tool, truncateHead } });
 mock.module("node:child_process", {
 	namedExports: {
 		execFile: Object.assign(() => {}, {
@@ -30,6 +31,7 @@ mock.module("node:child_process", {
 				const call = { file, args };
 				calls.push(call);
 				const running = (async () => {
+					if (stdout !== undefined) return { stdout };
 					if (answer) {
 						const answered = await answer(args);
 						if (answered instanceof Error) throw answered;
@@ -85,6 +87,7 @@ beforeEach(async () => {
 	afterExtract = () => {};
 	answer = undefined;
 	refuse = undefined;
+	stdout = undefined;
 	await rm(join(home, ".pi"), { recursive: true, force: true });
 	delete globalThis.piLetmeknow;
 	mock.method(globalThis, "fetch", async url => {
@@ -237,6 +240,62 @@ test("a listener stopped before ready tells the agent without inventing a restar
 	assert.match((await session.ready).message, /letmeknow stopped \(exit 1\): cannot start/);
 	assert.equal(session.messages.length, 1);
 	assert.deepEqual(session.messages[0].message.content, [{ type: "text", text: "letmeknow stopped (exit 1): cannot start\nNothing reaches you until your letmeknow session runs again." }]);
+	await session.shutdown();
+});
+
+test("printed lines keep at most 32 Ki characters before waiting, with the whole line in the log", async t => {
+	await release("0.25.2");
+	const session = start();
+	await session.ready;
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const limit = 32 * 1024;
+	const overhead = JSON.stringify({ type: "message", text: "" }).length;
+	for (const size of [limit, limit + 1, 2 * 1024 * 1024]) {
+		const line = JSON.stringify({ type: "message", text: "x".repeat(size - overhead) });
+		listeners[0].child.stdout.write(`${line}\n`);
+		t.mock.timers.tick(2000);
+		const text = session.messages.at(-1).message.content[0].text;
+		const expected = size > limit ? `${line.slice(0, limit)} [letmeknow: line truncated; the session's log has the whole line.]` : line;
+		assert.equal(text.length, expected.length);
+		assert.equal(text, expected);
+		session.messageStart(session.messages.at(-1).message);
+	}
+	await session.shutdown();
+});
+
+for (const limit of ["bytes", "lines"]) {
+	test(`wake batches use Pi's default ${limit} limit and point to the session's log`, async t => {
+		await release("0.25.2");
+		const session = start();
+		await session.ready;
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const lines = limit === "bytes"
+			? Array(3).fill(JSON.stringify({ type: "message", text: "é".repeat(10000) }))
+			: Array(2001).fill('{"type":"event"}');
+		listeners[0].child.stdout.write(`${lines.join("\n")}\n`);
+		t.mock.timers.tick(2000);
+		const output = truncateHead(lines.join("\n"));
+		assert.equal(output.truncatedBy, limit);
+		const expected = `${output.content}\n[letmeknow: output truncated; the rest is in the session's log.]`;
+		const text = session.messages[0].message.content[0].text;
+		assert.equal(text.length, expected.length);
+		assert.equal(text, expected);
+		await session.shutdown();
+	});
+}
+
+test("tool stdout uses Pi's default limits and says how many lines were shown only when truncated", async () => {
+	await release("0.25.2");
+	const session = start();
+	await session.ready;
+	for (const value of ["", "small\n", "x".repeat(50 * 1024), "x".repeat(50 * 1024 + 1), Array(3).fill("é".repeat(10000)).join("\n"), Array(2000).fill("line").join("\n"), Array(2001).fill("line").join("\n")]) {
+		stdout = value;
+		const output = truncateHead(stdout);
+		const expected = output.content + (output.truncated ? `\n[letmeknow: output truncated; showing ${output.outputLines} of ${output.totalLines} lines.]` : "");
+		const result = await session.command(["groups"]);
+		assert.equal(result.content[0].text.length, expected.length);
+		assert.deepEqual(result, { content: [{ type: "text", text: expected }], details: undefined });
+	}
 	await session.shutdown();
 });
 
