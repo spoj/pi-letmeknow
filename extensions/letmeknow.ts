@@ -4,7 +4,7 @@
 // letmeknow's own binary, the newest release of the minor version it speaks, which it fetches from npm into
 // ~/.cache/pi-letmeknow, and /letmeknow-update runs the session again with a newer one, as the same session. The letmeknow
 // session logs every event and prints what concerns the agent: those lines reach the agent as one message that starts a
-// turn, once none came for a moment; its `ready` only gives the session's fingerprint, program and log, which the system
+// turn, 2 seconds after the first waiting line; its `ready` only gives the session's fingerprint, program and log, which the system
 // prompt shows, and the status line the fingerprint, as other members know the session by it. The agent's `letmeknow` tool
 // runs the session's program for its commands.
 import { type ChildProcess, execFile, spawn } from "node:child_process";
@@ -29,7 +29,7 @@ const SETTINGS = join(homedir(), ".pi", "agent", "letmeknow.json");
 // How long a sibling has to start and make its invite: back from a while away, its invite first catches up, up to about
 // two minutes.
 const INVITE_WAIT = 180_000;
-// How long the lines the session prints wait for more before they wake the agent together.
+// How long the first waiting line waits before the lines wake the agent together.
 const DEBOUNCE = 2000;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
 // process loads, the first to start a session puts it in letmeknow, until that session ends.
@@ -140,8 +140,9 @@ export default function (pi: ExtensionAPI): void {
 
 	function wake(line: string): void {
 		waiting.push(line);
-		clearTimeout(timer);
+		if (timer) return;
 		timer = setTimeout(() => {
+			timer = undefined;
 			const lines = waiting;
 			waiting = [];
 			notify(lines.join("\n"));
@@ -300,6 +301,7 @@ export default function (pi: ExtensionAPI): void {
 		// Stops a sibling run for a join, which would otherwise outlive Pi.
 		stop.abort();
 		clearTimeout(timer);
+		timer = undefined;
 		waiting = [];
 		delete claim.piLetmeknow;
 		delete process.env.LETMEKNOW_SESSION;

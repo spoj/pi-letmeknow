@@ -126,6 +126,7 @@ function start(name = "named") {
 	const ready = Promise.withResolvers();
 	let tool, status;
 	const commands = {};
+	const messages = [];
 	const ctx = {
 		cwd: home, mode: "tui", waitForIdle: async () => {},
 		sessionManager: { getSessionName: () => name },
@@ -141,10 +142,14 @@ function start(name = "named") {
 		on: (event, handler) => { handlers[event] = handler; },
 		registerTool: value => { tool = value; },
 		registerCommand: (name, command) => { commands[name] = command; },
+		sendMessage: (message, options) => { messages.push({ message, options }); },
 	});
 	handlers.session_start({}, ctx);
 	return {
 		ready: ready.promise,
+		messages,
+		messageStart: message => handlers.message_start({ message: { role: "custom", ...message } }),
+		sessionStart: () => handlers.session_start({}, ctx),
 		status: () => status,
 		systemPrompt: () => {
 			const event = { systemPromptOptions: { sections: {} } };
@@ -156,6 +161,47 @@ function start(name = "named") {
 		shutdown: () => handlers.session_shutdown({}, ctx),
 	};
 }
+
+test("lines wake the agent 2 seconds after the first waiting line, even while more arrive", async t => {
+	await release("0.25.2");
+	const session = start();
+	await session.ready;
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const { stdout } = listeners[0].child;
+	for (let batch = 0; batch < 3; batch++) {
+		stdout.write('{"type":"message","text":"first"}\n');
+		t.mock.timers.tick(1500);
+		stdout.write('{"type":"message","text":"second"}\n');
+		t.mock.timers.tick(499);
+		assert.equal(session.messages.length, batch);
+		t.mock.timers.tick(1);
+		assert.equal(session.messages.length, batch + 1);
+		assert.deepEqual(session.messages[batch], {
+			message: { customType: "letmeknow", display: true, content: [{ type: "text", text: '{"type":"message","text":"first"}\n{"type":"message","text":"second"}' }] },
+			options: { deliverAs: "steer", triggerTurn: true },
+		});
+		session.messageStart(session.messages[batch].message);
+	}
+	await session.shutdown();
+});
+
+test("shutdown clears the wake timer and waiting lines before another session starts", async t => {
+	await release("0.25.2");
+	const session = start();
+	await session.ready;
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	listeners[0].child.stdout.write('{"type":"message","text":"old"}\n');
+	await session.shutdown();
+	t.mock.timers.tick(2000);
+	assert.deepEqual(session.messages, []);
+	session.sessionStart();
+	await session.command(["skill"]);
+	listeners[1].child.stdout.write('{"type":"message","text":"new"}\n');
+	t.mock.timers.tick(2000);
+	assert.equal(session.messages.length, 1);
+	assert.deepEqual(session.messages[0].message.content, [{ type: "text", text: '{"type":"message","text":"new"}' }]);
+	await session.shutdown();
+});
 
 test("publishes the entire package at an immutable platform/full-version path and reuses it", async () => {
 	await release("0.25.2");
