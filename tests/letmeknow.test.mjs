@@ -50,10 +50,11 @@ mock.module("node:child_process", {
 			const child = Object.assign(new EventEmitter(), {
 				stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null,
 				kill: () => {
-					if (child.killed) return;
+					if (child.killed) return false;
 					child.killed = true;
 					child.signalCode = "SIGTERM";
 					setImmediate(() => child.emit("exit", null, "SIGTERM"));
+					return true;
 				},
 			});
 			// As Node does, an abort kills the child and emits an AbortError.
@@ -122,7 +123,10 @@ async function release(version, plugins = { kind: `kind ${version}` }) {
 	return join(cache, target, version, "bin", executable);
 }
 
-function start(name = "named", mode = "tui") {
+const kept = fp => ({ type: "custom", customType: "letmeknow", data: { fp } });
+
+// A Pi session whose file holds `entries`: those of an earlier run of it, for one that starts again.
+function start(name = "named", mode = "tui", entries = []) {
 	// Independent Pi processes have independent claims; emulate them around each factory's session state.
 	delete globalThis.piLetmeknow;
 	const handlers = {};
@@ -132,7 +136,7 @@ function start(name = "named", mode = "tui") {
 	const messages = [];
 	const ctx = {
 		cwd: home, mode, waitForIdle: async () => {},
-		sessionManager: { getSessionName: () => name },
+		sessionManager: { getSessionName: () => name, getEntries: () => [...entries] },
 		ui: {
 			notify: (message, level) => {
 				notices.push({ message, level });
@@ -146,11 +150,13 @@ function start(name = "named", mode = "tui") {
 		registerTool: value => { tool = value; },
 		registerCommand: (name, command) => { commands[name] = command; },
 		sendMessage: (message, options) => { messages.push({ message, options }); },
+		appendEntry: (customType, data) => { entries.push({ type: "custom", customType, data }); },
 	});
 	handlers.session_start({}, ctx);
 	return {
 		ready: ready.promise,
 		messages,
+		entries,
 		messageStart: message => handlers.message_start({ message: { role: "custom", ...message } }),
 		sessionStart: () => handlers.session_start({}, ctx),
 		status: () => status,
@@ -161,7 +167,7 @@ function start(name = "named", mode = "tui") {
 		},
 		command: (args, input) => tool.execute("id", { args, input }, undefined, undefined, ctx),
 		update: () => commands["letmeknow-update"].handler("", ctx),
-		shutdown: () => handlers.session_shutdown({}, ctx),
+		shutdown: (reason = "quit") => handlers.session_shutdown({ reason }, ctx),
 	};
 }
 
@@ -413,6 +419,7 @@ test("/letmeknow-update runs the session again with the newest patch, as the sam
 	await session.command(["groups"]);
 	assert.deepEqual(calls.at(-1), { file: newest, args: ["--session", "3123456789abcdef", "groups"], input: "" });
 	assert.equal(session.status(), "lmk:3123456789abcdef");
+	assert.deepEqual(session.entries, [kept("1123456789abcdef"), kept("3123456789abcdef")]);
 	assert.deepEqual(notices.slice(2), [{ message: "letmeknow: 3123456789abcdef runs 0.25.20, updated from 0.25.19", level: "info" }]);
 	await session.shutdown();
 	assert.equal(listeners[2].child.killed, true);
@@ -577,6 +584,7 @@ test("a Pi session attaches to the session letmeknow.json names, as its reader, 
 	await new Promise(resolve => setTimeout(resolve, 10));
 	await session.command(["groups"]);
 	assert.equal(calls.at(-1).file, "/detached/newer");
+	assert.deepEqual(session.entries, [kept("fedcba9876543210")]);
 	await session.update();
 	assert.equal(listeners.length, 1, "one that runs on its own is updated by running it again");
 	assert.match(notices.at(-1).message, /fedcba9876543210 runs on its own/);
@@ -598,6 +606,60 @@ test("a Pi session whose session to attach to has a reader already is a new letm
 	assert.match(notices[0].message, /not attached to fedcba9876543210 \(letmeknow: session fedcba9876543210 has a reader attached already\)/);
 	await session.shutdown();
 	assert.equal(listeners[1].child.killed, true);
+});
+
+test("a Pi session keeps its letmeknow session's fingerprint, and one that starts again is that session once its last run stopped", async () => {
+	await release("0.25.2");
+	const first = start();
+	await first.ready;
+	assert.deepEqual(first.entries, [kept("1123456789abcdef")]);
+	let exited = false;
+	listeners[0].child.once("exit", () => { exited = true; });
+	await first.shutdown("reload");
+	assert.equal(exited, true, "the session that a reload starts next runs the same letmeknow session, which one process runs");
+	const again = start("named", "tui", first.entries);
+	await again.ready;
+	assert.deepEqual(listeners.map(item => item.args), [["listen"], ["--session", "1123456789abcdef", "listen"]]);
+	assert.equal(again.status(), "lmk:1123456789abcdef");
+	assert.deepEqual(again.entries, [kept("1123456789abcdef")]);
+	exited = false;
+	listeners[1].child.once("exit", () => { exited = true; });
+	await again.shutdown();
+	assert.deepEqual([listeners[1].child.killed, exited], [true, false], "a Pi that quits does not wait for it");
+	assert.deepEqual(notices, []);
+});
+
+test("a Pi session whose letmeknow session does not run again is a new one, and keeps that one's fingerprint", async () => {
+	await release("0.25.2");
+	refuse = args => args[0] === "--session" && "letmeknow: this session is already running\n";
+	const session = start("named", "tui", [kept("0000000000000000"), kept("aaaaaaaaaaaaaaaa")]);
+	await session.ready;
+	assert.deepEqual(listeners.map(item => item.args), [["--session", "aaaaaaaaaaaaaaaa", "listen"], ["listen"]]);
+	assert.deepEqual(notices, [{ message: "letmeknow: not aaaaaaaaaaaaaaaa again (letmeknow: this session is already running)", level: "info" }]);
+	assert.equal(session.status(), "lmk:2123456789abcdef");
+	assert.deepEqual(session.entries.slice(2), [kept("2123456789abcdef")]);
+	await session.shutdown();
+});
+
+test("a Pi session is the letmeknow session it was before the one letmeknow.json names to attach to, which it attaches to if it was that one", async () => {
+	await release("0.25.2");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ attach: "fedcba9876543210" }));
+	const own = start("named", "tui", [kept("aaaaaaaaaaaaaaaa")]);
+	await own.ready;
+	await own.shutdown();
+	const attached = start("named", "tui", [kept("fedcba9876543210")]);
+	await attached.ready;
+	await attached.shutdown();
+	assert.deepEqual(listeners.map(item => item.args), [["--session", "aaaaaaaaaaaaaaaa", "listen"], ["--session", "fedcba9876543210", "attach"]]);
+	assert.deepEqual(notices, []);
+	refuse = args => args[0] === "--session" && "refused\n";
+	const neither = start("named", "tui", [kept("aaaaaaaaaaaaaaaa")]);
+	await neither.ready;
+	assert.deepEqual(listeners.slice(2).map(item => item.args), [["--session", "aaaaaaaaaaaaaaaa", "listen"], ["--session", "fedcba9876543210", "attach"], ["listen"]]);
+	assert.deepEqual(notices.map(n => n.message), ["letmeknow: not aaaaaaaaaaaaaaaa again (refused)", "letmeknow: not attached to fedcba9876543210 (refused); this Pi session is a new letmeknow session"]);
+	assert.deepEqual(neither.entries.at(-1), kept("5123456789abcdef"));
+	await neither.shutdown();
 });
 
 test("a Pi session that ends during a join stops the sibling it runs meanwhile, and joins no further", async () => {

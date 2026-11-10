@@ -1,6 +1,7 @@
 // Puts a Pi session in letmeknow: an interactive one, and any with a name (`pi --name <name>`), as a new letmeknow session
 // known by its fingerprint, which joins the groups of ~/.pi/agent/letmeknow.json and goes when the Pi session ends in no group;
-// or as the session that file names to attach to, which runs on its own, while no other Pi session is attached to it. It runs
+// or as the session that file names to attach to, which runs on its own, while no other Pi session is attached to it. The Pi
+// session keeps the fingerprint, and is that letmeknow session again as it starts again, reloaded or continued. It runs
 // letmeknow's own binary, the newest release of the minor version it speaks, which it fetches from npm into
 // ~/.cache/pi-letmeknow, and /letmeknow-update runs the session again with a newer one, as the same session. The letmeknow
 // session logs every event and prints what concerns the agent: those lines reach the agent as one message that starts a
@@ -240,6 +241,8 @@ export default function (pi: ExtensionAPI): void {
 		const current: NonNullable<typeof session> = { executable: install(message => ctx.ui.notify(message, "warning")), ready, settle, stop: new AbortController() };
 		session = current;
 		const settings: Promise<{ join?: string[]; attach?: string }> = existsSync(SETTINGS) ? readFile(SETTINGS, "utf8").then(JSON.parse) : Promise.resolve({});
+		// The letmeknow session this Pi session last was: of every branch, as a session is one member whichever is current.
+		let kept = (ctx.sessionManager.getEntries().findLast(entry => entry.type === "custom" && entry.customType === "letmeknow") as { data: { fp: string } } | undefined)?.data.fp;
 		Promise.all([current.executable, settings]).then(
 			([executable, { join: groups = [], attach }]) => {
 				if (session !== current) return;
@@ -272,6 +275,10 @@ export default function (pi: ExtensionAPI): void {
 						current.bin = event.bin;
 						current.log = event.log;
 						current.attached = args.includes("attach");
+						if (event.fp !== kept) {
+							kept = event.fp;
+							pi.appendEntry("letmeknow", { fp: kept });
+						}
 						process.env.LETMEKNOW_SESSION = event.fp;
 						current.settle.resolve(event.fp);
 						ctx.ui.setStatus("letmeknow", `lmk:${event.fp}`);
@@ -284,12 +291,20 @@ export default function (pi: ExtensionAPI): void {
 					});
 				};
 				current.restart = (program, args) => start(program, args, stopped);
-				if (!attach) return start(executable, ["listen"], stopped);
+				const fresh = () => start(executable, ["listen"], stopped);
 				// One that has a reader already, or does not run, leaves this Pi session a new letmeknow session.
-				start(executable, ["--session", attach, "attach"], (code, errors) => {
+				const attached = () => !attach ? fresh() : start(executable, ["--session", attach, "attach"], (code, errors) => {
 					if (current.fp || session !== current) return stopped(code, errors);
 					ctx.ui.notify(`letmeknow: not attached to ${attach} (${errors}); this Pi session is a new letmeknow session`, "info");
-					start(executable, ["listen"], stopped);
+					fresh();
+				});
+				if (!kept || kept === attach) return attached();
+				// One that letmeknow deleted, as it stopped in no group, or that runs elsewhere, leaves this Pi session what one
+				// that never was in letmeknow would be.
+				start(executable, ["--session", kept, "listen"], (code, errors) => {
+					if (current.fp || session !== current) return stopped(code, errors);
+					ctx.ui.notify(`letmeknow: not ${kept} again (${errors})`, "info");
+					attached();
 				});
 			},
 			error => {
@@ -307,7 +322,7 @@ export default function (pi: ExtensionAPI): void {
 		event.systemPromptOptions.sections.letmeknow = `You are in letmeknow${fp} in a session that runs already:${log} what concerns you reaches you as messages, and only what you send with it reaches anyone.${attached} Your letmeknow tool runs its commands; read \`skill\` with it before you first use letmeknow.`;
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_shutdown", async (event, ctx) => {
 		if (!session) return;
 		const { listen, settle, stop } = session;
 		session = undefined;
@@ -320,7 +335,8 @@ export default function (pi: ExtensionAPI): void {
 		delete claim.piLetmeknow;
 		delete process.env.LETMEKNOW_SESSION;
 		ctx.ui.setStatus("letmeknow", undefined);
-		// One whose letmeknow had not started yet has nothing to stop; letmeknow deletes one that stops in no group.
-		listen?.kill();
+		// One whose letmeknow had not started yet has nothing to stop; letmeknow deletes one that stops in no group. The Pi
+		// session that a reload or a fork starts next is the same letmeknow session, which runs once this run of it stopped.
+		if (listen?.kill() && (event.reason === "reload" || event.reason === "fork")) await new Promise(resolve => listen.once("exit", resolve));
 	});
 }
