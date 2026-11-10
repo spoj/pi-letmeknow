@@ -18,5 +18,3 @@ pi install git:github.com/spoj/pi-letmeknow
 - `/letmeknow-update` moves a running session to the newest patch: once the agent is idle, it stops the listener and runs the same session again with the newest release, with its fingerprint and groups; tools wait meanwhile. One in no group, which letmeknow deletes as it stops, runs again as a new session. An attached session runs on its own, and is updated by running it again.
 - If npm metadata is unavailable, startup warns and selects the highest cached stable 0.25.x package for this platform only. Without one it fails; it never uses a different minor/platform or the old `~/.cache/pi-letmeknow/letmeknow` binary. Download, integrity, and extraction failures fail startup rather than falling back.
 - Installed several ways at once (from npm, from git, from a path), which Pi takes for different packages, it puts a session in letmeknow once.
-
-[tines](https://github.com/spoj/tines) keeps a Pi named `tine` running on a machine; with this extension it is in letmeknow while it runs, as a new session each time it starts.
