@@ -31,7 +31,12 @@ const SETTINGS = join(homedir(), ".pi", "agent", "letmeknow.json");
 const INVITE_WAIT = 180_000;
 // How long the first waiting line waits before the lines wake the agent together.
 const DEBOUNCE = 2000;
-const MAX_LINE = 32 * 1024;
+// How many characters of a line the session prints reach the agent: at 4 bytes each, still a line that Pi's truncation of a
+// batch, by whole lines within 50 KB, keeps.
+const MAX_LINE = 12 * 1024;
+// How many characters of a command's output the tool returns: an answer is one line of JSON, which truncation by whole
+// lines would drop.
+const MAX_OUTPUT = 50_000;
 // Pi loads a package once, but from npm, from git and from a path this extension is three packages: of the copies a Pi
 // process loads, the first to start a session puts it in letmeknow, until that session ends.
 const claim = globalThis as { piLetmeknow?: true };
@@ -184,8 +189,8 @@ export default function (pi: ExtensionAPI): void {
 			const running = run(current.bin!, ["--session", fp, ...args], { cwd: ctx.cwd, signal, maxBuffer: 64 << 20 });
 			running.child.stdin!.end(input ?? "");
 			try {
-				const output = truncateHead((await running).stdout);
-				const text = output.content + (output.truncated ? `\n[letmeknow: output truncated; showing ${output.outputLines} of ${output.totalLines} lines.]` : "");
+				const { stdout } = await running;
+				const text = stdout.length > MAX_OUTPUT ? `${stdout.slice(0, MAX_OUTPUT)}\n[letmeknow: output truncated; showing ${MAX_OUTPUT} of ${stdout.length} characters.]` : stdout;
 				return { content: [{ type: "text", text }], details: undefined };
 			} catch (error) {
 				throw new Error((error as { stderr?: string }).stderr?.trim() || (error as Error).message);
@@ -245,8 +250,8 @@ export default function (pi: ExtensionAPI): void {
 					current.settle.reject(new Error(message));
 					if (session === current) {
 						ctx.ui.notify(message, "error");
-						const restart = current.fp && current.bin ? ` Run it again with: ${current.bin} --session ${current.fp} listen` : "";
-						notify(`${message}\nNothing reaches you until your letmeknow session runs again.${restart}`);
+						const again = current.fp && current.bin ? `: ${current.bin} --session ${current.fp} ${current.attached ? "attach" : "listen"}` : ".";
+						notify(`${message}\nNothing reaches you until it runs again${again}`);
 					}
 				};
 				// Runs `listen` or `attach`, `args`, with `program`: what it prints reaches the agent, and its `ready` names the session.

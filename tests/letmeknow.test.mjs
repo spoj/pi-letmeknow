@@ -221,7 +221,7 @@ for (const attached of [false, true]) {
 		const fp = attached ? "fedcba9876543210" : "1123456789abcdef";
 		const bin = attached ? "/detached/letmeknow" : binary;
 		assert.deepEqual(session.messages, [{
-			message: { customType: "letmeknow", display: true, content: [{ type: "text", text: `letmeknow stopped (exit 7): first error\nlast error\nNothing reaches you until your letmeknow session runs again. Run it again with: ${bin} --session ${fp} listen` }] },
+			message: { customType: "letmeknow", display: true, content: [{ type: "text", text: `letmeknow stopped (exit 7): first error\nlast error\nNothing reaches you until it runs again: ${bin} --session ${fp} ${attached ? "attach" : "listen"}` }] },
 			options: { deliverAs: "steer", triggerTurn: true },
 		}]);
 		assert.deepEqual(notices, [{ message: "letmeknow stopped (exit 7): first error\nlast error", level: "error" }]);
@@ -239,16 +239,16 @@ test("a listener stopped before ready tells the agent without inventing a restar
 	const session = start("named", "headless");
 	assert.match((await session.ready).message, /letmeknow stopped \(exit 1\): cannot start/);
 	assert.equal(session.messages.length, 1);
-	assert.deepEqual(session.messages[0].message.content, [{ type: "text", text: "letmeknow stopped (exit 1): cannot start\nNothing reaches you until your letmeknow session runs again." }]);
+	assert.deepEqual(session.messages[0].message.content, [{ type: "text", text: "letmeknow stopped (exit 1): cannot start\nNothing reaches you until it runs again." }]);
 	await session.shutdown();
 });
 
-test("printed lines keep at most 32 Ki characters before waiting, with the whole line in the log", async t => {
+test("printed lines keep at most 12 Ki characters before waiting, with the whole line in the log", async t => {
 	await release("0.25.2");
 	const session = start();
 	await session.ready;
 	t.mock.timers.enable({ apis: ["setTimeout"] });
-	const limit = 32 * 1024;
+	const limit = 12 * 1024;
 	const overhead = JSON.stringify({ type: "message", text: "" }).length;
 	for (const size of [limit, limit + 1, 2 * 1024 * 1024]) {
 		const line = JSON.stringify({ type: "message", text: "x".repeat(size - overhead) });
@@ -284,14 +284,13 @@ for (const limit of ["bytes", "lines"]) {
 	});
 }
 
-test("tool stdout uses Pi's default limits and says how many lines were shown only when truncated", async () => {
+test("tool stdout keeps its first 50,000 characters, one line or many, and says so only when truncated", async () => {
 	await release("0.25.2");
 	const session = start();
 	await session.ready;
-	for (const value of ["", "small\n", "x".repeat(50 * 1024), "x".repeat(50 * 1024 + 1), Array(3).fill("é".repeat(10000)).join("\n"), Array(2000).fill("line").join("\n"), Array(2001).fill("line").join("\n")]) {
+	for (const value of ["", "small\n", "x".repeat(50_000), "x".repeat(50_001), Array(9).fill("é".repeat(10000)).join("\n")]) {
 		stdout = value;
-		const output = truncateHead(stdout);
-		const expected = output.content + (output.truncated ? `\n[letmeknow: output truncated; showing ${output.outputLines} of ${output.totalLines} lines.]` : "");
+		const expected = stdout.length > 50_000 ? `${stdout.slice(0, 50_000)}\n[letmeknow: output truncated; showing 50000 of ${stdout.length} characters.]` : stdout;
 		const result = await session.command(["groups"]);
 		assert.equal(result.content[0].text.length, expected.length);
 		assert.deepEqual(result, { content: [{ type: "text", text: expected }], details: undefined });
