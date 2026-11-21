@@ -117,18 +117,23 @@ async function inviteFrom(executable: string, sibling: { fp: string; running?: b
 }
 
 // Joins the session `fp` to each of `groups` it is not in, through a sibling: a running one first; until `signal` aborts.
-async function joinListed(executable: string, fp: string, groups: string[], signal: AbortSignal): Promise<string[]> {
-	if (!groups.length) return [];
+async function joinListed(executable: string, fp: string, groups: string[], signal: AbortSignal): Promise<{ joined: string[]; warnings: string[] }> {
+	if (!groups.length) return { joined: [], warnings: [] };
 	const { sessions } = (await letmeknow(executable, ["sessions"])) as { sessions: { fp: string; running?: boolean; groups?: string[] }[] };
+	const joined: string[] = [];
 	const warnings: string[] = [];
 	for (const group of groups) {
-		if (sessions.find(s => s.fp === fp)?.groups?.includes(group)) continue;
+		if (sessions.find(s => s.fp === fp)?.groups?.includes(group)) {
+			joined.push(group);
+			continue;
+		}
 		const siblings = sessions.filter(s => s.fp !== fp && s.groups?.includes(group)).sort((a, b) => Number(!!b.running) - Number(!!a.running));
 		const failures: string[] = [];
 		for (const sibling of siblings) {
 			signal.throwIfAborted();
 			try {
 				await inviteFrom(executable, sibling, group, link => letmeknow(executable, ["--session", fp, "join", link]), signal);
+				joined.push(group);
 				break;
 			} catch (error) {
 				failures.push(`${sibling.fp}: ${(error as { stderr?: string }).stderr?.trim() || (error as Error).message}`);
@@ -136,7 +141,14 @@ async function joinListed(executable: string, fp: string, groups: string[], sign
 		}
 		if (failures.length === siblings.length) warnings.push(`letmeknow: cannot join ${group} through a session of this machine${failures.length ? ` (${failures.join("; ")})` : ""}`);
 	}
-	return warnings;
+	return { joined, warnings };
+}
+
+async function writeReadyReceipt(path: string, payload: Record<string, unknown>): Promise<void> {
+	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(tmp, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+	await rename(tmp, path);
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -232,6 +244,19 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if ((!ctx.sessionManager.getSessionName() && ctx.mode !== "tui") || claim.piLetmeknow) return;
 		claim.piLetmeknow = true;
+		// Per-launch overrides are consumed and scrubbed immediately so child processes never inherit or forge them.
+		const envJoin = process.env.PI_LETMEKNOW_JOIN;
+		const envAttach = process.env.PI_LETMEKNOW_ATTACH;
+		const readyFile = process.env.PI_LETMEKNOW_READY_FILE;
+		delete process.env.PI_LETMEKNOW_JOIN;
+		delete process.env.PI_LETMEKNOW_ATTACH;
+		delete process.env.PI_LETMEKNOW_READY_FILE;
+		let receiptSent = false;
+		const emitReceipt = (payload: Record<string, unknown>) => {
+			if (!readyFile || receiptSent) return;
+			receiptSent = true;
+			void writeReadyReceipt(readyFile, payload).catch(error => ctx.ui.notify(`letmeknow: failed writing readiness receipt: ${(error as Error).message}`, "warning"));
+		};
 		pi.registerTool(tool);
 		pi.registerCommand("letmeknow-update", update);
 		let settle!: NonNullable<typeof session>["settle"];
@@ -244,13 +269,16 @@ export default function (pi: ExtensionAPI): void {
 		// The letmeknow session this Pi session last was: of every branch, as a session is one member whichever is current.
 		let kept = (ctx.sessionManager.getEntries().findLast(entry => entry.type === "custom" && entry.customType === "letmeknow") as { data: { fp: string } } | undefined)?.data.fp;
 		Promise.all([current.executable, settings]).then(
-			([executable, { join: groups = [], attach }]) => {
+			([executable, fileSettings]) => {
 				if (session !== current) return;
+				const groups = envJoin !== undefined ? envJoin.split(",").map(s => s.trim()).filter(Boolean) : (fileSettings.join ?? []);
+				const attach = envAttach !== undefined ? (envAttach || undefined) : fileSettings.attach;
 				// A new session, not the one a parent Pi's LETMEKNOW_SESSION names.
 				const { LETMEKNOW_SESSION: _, ...env } = process.env;
 				const stopped = (code: number | null, errors: string) => {
 					const message = `letmeknow stopped (exit ${code}): ${errors}`;
 					current.settle.reject(new Error(message));
+					emitReceipt({ error: message });
 					if (session === current) {
 						ctx.ui.notify(message, "error");
 						const again = current.fp && current.bin ? `: ${current.bin} --session ${current.fp} ${current.attached ? "attach" : "listen"}` : ".";
@@ -285,8 +313,17 @@ export default function (pi: ExtensionAPI): void {
 						// One that ended meanwhile, or whose run an update stopped, stopped the join; its ctx may be stale.
 						const { signal } = current.stop;
 						joinListed(program, event.fp, groups, signal).then(
-							warnings => !signal.aborted && warnings.forEach(warning => ctx.ui.notify(warning, "warning")),
-							error => !signal.aborted && ctx.ui.notify(`letmeknow: joining the groups of ${SETTINGS}: ${error.message}`, "warning")
+							({ joined, warnings }) => {
+								if (signal.aborted) return;
+								warnings.forEach(warning => ctx.ui.notify(warning, "warning"));
+								emitReceipt({ fp: event.fp, groups: joined, warnings });
+							},
+							error => {
+								if (signal.aborted) return;
+								const message = `letmeknow: joining the groups of ${SETTINGS}: ${(error as Error).message}`;
+								ctx.ui.notify(message, "warning");
+								emitReceipt({ fp: event.fp, groups: [], warnings: [message], error: (error as Error).message });
+							}
 						);
 					});
 				};
@@ -309,6 +346,7 @@ export default function (pi: ExtensionAPI): void {
 			},
 			error => {
 				current.settle.reject(error);
+				emitReceipt({ error: (error as Error).message });
 				ctx.ui.notify(`letmeknow: ${error.message}`, "error");
 			}
 		);

@@ -718,3 +718,53 @@ test("/letmeknow-update during a join stops it and the sibling it runs, and the 
 	assert.deepEqual(notices.filter(n => n.level !== "info"), []);
 	await session.shutdown();
 });
+
+test("per-launch env overrides join/attach, scrubs process.env, and writes ready receipt only after join completes", async () => {
+	await release("0.26.9");
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(join(home, ".pi", "agent", "letmeknow.json"), JSON.stringify({ join: ["DEFAULT_G"], attach: "fedcba9876543210" }));
+	const readyPath = join(home, "ready", "receipt.json");
+	const inviteGate = Promise.withResolvers();
+	answer = args => {
+		if (args[0] === "sessions") return { sessions: [{ fp: "sibling", running: true, groups: ["LOCAL_G"] }] };
+		if (args[2] === "invite") return inviteGate.promise;
+		return {};
+	};
+	process.env.PI_LETMEKNOW_JOIN = "LOCAL_G";
+	process.env.PI_LETMEKNOW_ATTACH = "";
+	process.env.PI_LETMEKNOW_READY_FILE = readyPath;
+	const session = start();
+	assert.equal(process.env.PI_LETMEKNOW_JOIN, undefined);
+	assert.equal(process.env.PI_LETMEKNOW_ATTACH, undefined);
+	assert.equal(process.env.PI_LETMEKNOW_READY_FILE, undefined);
+	await session.ready;
+	assert.deepEqual(listeners.map(item => item.args), [["listen"]]);
+	await new Promise(resolve => setTimeout(resolve, 15));
+	assert.equal(existsSync(readyPath), false);
+	inviteGate.resolve({ link: "link-local" });
+	for (let i = 0; i < 50 && !existsSync(readyPath); i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(existsSync(readyPath), true);
+	assert.deepEqual(JSON.parse(await readFile(readyPath, "utf8")), {
+		fp: "1123456789abcdef",
+		groups: ["LOCAL_G"],
+		warnings: [],
+	});
+	assert.deepEqual(calls.map(c => c.args.join(" ")), [
+		"sessions",
+		"--session sibling invite --group LOCAL_G",
+		"--session 1123456789abcdef join link-local",
+	]);
+	await session.shutdown();
+});
+
+test("ready receipt records error when startup fails before ready", async () => {
+	offline = true;
+	const readyPath = join(home, "ready", "fail.json");
+	process.env.PI_LETMEKNOW_READY_FILE = readyPath;
+	const session = start();
+	for (let i = 0; i < 50 && !existsSync(readyPath); i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(existsSync(readyPath), true);
+	const receipt = JSON.parse(await readFile(readyPath, "utf8"));
+	assert.match(receipt.error, /offline/);
+	await session.shutdown();
+});
