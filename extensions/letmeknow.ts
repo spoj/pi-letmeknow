@@ -242,6 +242,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		if (process.env.PI_LETMEKNOW_DISABLE === "1") return;
 		if ((!ctx.sessionManager.getSessionName() && ctx.mode !== "tui") || claim.piLetmeknow) return;
 		claim.piLetmeknow = true;
 		// Per-launch overrides are consumed and scrubbed immediately so child processes never inherit or forge them.

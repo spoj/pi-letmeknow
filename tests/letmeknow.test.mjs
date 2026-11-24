@@ -91,6 +91,7 @@ beforeEach(async () => {
 	stdout = undefined;
 	await rm(join(home, ".pi"), { recursive: true, force: true });
 	delete globalThis.piLetmeknow;
+	delete process.env.PI_LETMEKNOW_DISABLE;
 	mock.method(globalThis, "fetch", async url => {
 		requests.push(url);
 		if (offline) throw new Error("offline");
@@ -767,4 +768,25 @@ test("ready receipt records error when startup fails before ready", async () => 
 	const receipt = JSON.parse(await readFile(readyPath, "utf8"));
 	assert.match(receipt.error, /offline/);
 	await session.shutdown();
+});
+
+test("PI_LETMEKNOW_DISABLE=1 skips starting letmeknow and leaves existing LETMEKNOW_SESSION intact", async () => {
+	await release("0.26.9");
+	process.env.PI_LETMEKNOW_DISABLE = "1";
+	process.env.LETMEKNOW_SESSION = "external12345678";
+	try {
+		const session = start();
+		await new Promise(resolve => setTimeout(resolve, 20));
+		assert.equal(listeners.length, 0);
+		assert.equal(calls.length, 0);
+		assert.equal(session.status(), undefined);
+		assert.equal(session.systemPrompt(), undefined);
+		assert.equal(process.env.LETMEKNOW_SESSION, "external12345678");
+		assert.equal(process.env.PI_LETMEKNOW_DISABLE, "1");
+		await session.shutdown();
+		assert.equal(process.env.LETMEKNOW_SESSION, "external12345678");
+	} finally {
+		delete process.env.PI_LETMEKNOW_DISABLE;
+		delete process.env.LETMEKNOW_SESSION;
+	}
 });
